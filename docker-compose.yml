@@ -1,0 +1,91 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: anasti_auth
+      POSTGRES_USER: anasti
+      POSTGRES_PASSWORD: anasti
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U anasti -d anasti_auth"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  auth:
+    build:
+      context: ./services/auth
+    environment:
+      DATABASE_URL: postgresql+asyncpg://anasti:anasti@postgres:5432/anasti_auth
+      JWT_SECRET: super-secret-jwt-key
+      JWT_ALGORITHM: HS256
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+
+  anasti_collector:
+    build:
+      context: ./services/anasti_collector
+    environment:
+      JWT_SECRET: super-secret-jwt-key
+      JWT_ALGORITHM: HS256
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+      COLLECTOR_RPC_QUEUE: collector.rpc
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8002:8000"
+
+  anasti_analize:
+    build:
+      context: ./services/anasti_analize
+    environment:
+      JWT_SECRET: super-secret-jwt-key
+      JWT_ALGORITHM: HS256
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+      ANALYSIS_RPC_QUEUE: analysis.rpc
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8003:8000"
+
+  api_gateway:
+    build:
+      context: ./api-gateway
+    environment:
+      JWT_SECRET: super-secret-jwt-key
+      JWT_ALGORITHM: HS256
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+      COLLECTOR_RPC_QUEUE: collector.rpc
+      ANALYSIS_RPC_QUEUE: analysis.rpc
+      RPC_TIMEOUT_SECONDS: 30
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      anasti_collector:
+        condition: service_started
+      anasti_analize:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+volumes:
+  postgres_data:

@@ -4,3 +4,6 @@
 [submodule "services/anasti_collector"]
 	path = services/anasti_collector
 	url = https://github.com/lavosami/anasti_collector.git
+[submodule "services/auth"]
+	path = services/auth
+	url = https://github.com/lavosami/auth.git

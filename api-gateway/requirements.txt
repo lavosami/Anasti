@@ -1,0 +1,5 @@
+aio-pika>=9.5.7
+fastapi[standard]>=0.128.0
+python-jose>=3.5.0
+python-multipart>=0.0.21
+uvicorn>=0.41.0
