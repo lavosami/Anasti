@@ -1,0 +1,53 @@
+:root {
+  --ink-strong: #102033;
+  --ink-soft: #36506d;
+  --ink-muted: #6d8298;
+  --surface: rgba(255, 255, 255, 0.88);
+  --surface-strong: rgba(255, 255, 255, 0.96);
+  --surface-line: rgba(16, 32, 51, 0.08);
+  --accent: #ff6b3d;
+  --accent-deep: #d94e23;
+  --accent-soft: rgba(255, 107, 61, 0.14);
+  --success-soft: rgba(39, 174, 96, 0.12);
+  --shadow-lg: 0 28px 80px rgba(16, 32, 51, 0.16);
+  --shadow-md: 0 12px 36px rgba(16, 32, 51, 0.12);
+  --radius-xl: 32px;
+  --radius-lg: 22px;
+  --radius-md: 16px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  color: var(--ink-strong);
+  background:
+    radial-gradient(circle at top left, rgba(255, 184, 133, 0.55), transparent 28%),
+    radial-gradient(circle at top right, rgba(57, 126, 255, 0.18), transparent 24%),
+    linear-gradient(160deg, #fff7ef 0%, #f8fbff 46%, #eef4fb 100%);
+  font-family:
+    "Space Grotesk",
+    "Avenir Next",
+    "Segoe UI",
+    sans-serif;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
