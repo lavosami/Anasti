@@ -1,0 +1,6 @@
+[submodule "services/anasti_analize"]
+	path = services/anasti_analize
+	url = https://github.com/lavosami/anasti_analize.git
+[submodule "services/anasti_collector"]
+	path = services/anasti_collector
+	url = https://github.com/lavosami/anasti_collector.git
