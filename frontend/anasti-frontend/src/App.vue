@@ -1,5 +1,8 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
+import { useI18n } from './i18n'
+
+const { locale, setLocale, t, availableLocales } = useI18n()
 
 const authBaseUrl = (import.meta.env.VITE_AUTH_URL || 'http://localhost:8001').replace(/\/$/, '')
 const gatewayBaseUrl = (import.meta.env.VITE_GATEWAY_URL || 'http://localhost:8000').replace(/\/$/, '')
@@ -10,7 +13,7 @@ const activeImporter = ref('jsonText')
 const loading = ref(false)
 const importLoading = ref(false)
 const analysisLoading = ref(false)
-const statusMessage = ref('Connect auth, import a dataset, then run analysis through the gateway.')
+const statusMessage = ref(t('feedback.initial'))
 const errorMessage = ref('')
 
 const authForm = reactive({
@@ -64,11 +67,35 @@ const categoricalSummaryEntries = computed(() =>
 const correlationEntries = computed(() =>
   analysisResult.value ? Object.entries(analysisResult.value.summary.correlation || {}) : [],
 )
-const groupedEntries = computed(() =>
-  analysisResult.value?.groups ? Object.entries(analysisResult.value.groups) : [],
-)
+const groupedBuckets = computed(() => {
+  const groups = analysisResult.value?.groups
+  if (!groups) {
+    return []
+  }
+  const values = Object.values(groups)
+  if (!values.length) {
+    return []
+  }
+
+  if (values[0]?.rows) {
+    return [
+      {
+        label: t('results.groupDefault'),
+        groups: Object.entries(groups),
+        bucket: 'default',
+      },
+    ]
+  }
+
+  return Object.entries(groups).map(([bucket, bucketGroups]) => ({
+    label: t(`results.groupBuckets.${bucket}`) || bucket,
+    groups: Object.entries(bucketGroups),
+    bucket,
+  }))
+})
 const previewRows = computed(() => datasetRows.value.slice(0, 8))
 const previewColumns = computed(() => availableColumns.value.slice(0, 8))
+const numberLocale = computed(() => (locale.value === 'ru' ? 'ru-RU' : 'en-US'))
 
 watch(availableColumns, (columns) => {
   if (!columns.length) {
@@ -77,13 +104,20 @@ watch(availableColumns, (columns) => {
   }
 
   if (!columns.includes(targetField.value)) {
-    targetField.value = columns.find((column) => {
-      const sample = datasetRows.value
-        .map((row) => row[column])
-        .filter((value) => value !== null && value !== undefined)
-      const uniqueCount = new Set(sample).size
-      return uniqueCount > 1 && uniqueCount <= Math.min(sample.length, 12)
-    }) || ''
+    targetField.value =
+      columns.find((column) => {
+        const sample = datasetRows.value
+          .map((row) => row[column])
+          .filter((value) => value !== null && value !== undefined)
+        const uniqueCount = new Set(sample).size
+        return uniqueCount > 1 && uniqueCount <= Math.min(sample.length, 12)
+      }) || ''
+  }
+})
+
+watch(locale, () => {
+  if (!errorMessage.value) {
+    statusMessage.value = t('feedback.initial')
   }
 })
 
@@ -115,6 +149,14 @@ function resetMessages() {
   statusMessage.value = ''
 }
 
+function setStatus(key, params = {}) {
+  statusMessage.value = t(key, params)
+}
+
+function setError(key, params = {}) {
+  errorMessage.value = t(key, params)
+}
+
 async function submitAuth() {
   resetMessages()
   loading.value = true
@@ -140,7 +182,9 @@ async function submitAuth() {
     authState.tokenType = payload.token_type || 'bearer'
     authState.email = authForm.email
     persistAuth()
-    statusMessage.value = `${authMode.value === 'login' ? 'Logged in' : 'Registered'} as ${authForm.email}.`
+    setStatus(authMode.value === 'login' ? 'auth.loggedIn' : 'auth.registered', {
+      email: authForm.email,
+    })
   } catch (error) {
     errorMessage.value = error.message
   } finally {
@@ -154,7 +198,7 @@ function logout() {
   authState.tokenType = 'bearer'
   authState.email = ''
   persistAuth()
-  statusMessage.value = 'Session cleared.'
+  setStatus('auth.sessionCleared')
 }
 
 async function importDataset() {
@@ -188,12 +232,19 @@ async function importDataset() {
       })
     } else {
       if (!selectedFile.value) {
-        throw new Error('Choose a file before importing.')
+        setError('import.chooseFileError')
+        return
+      }
+
+      const endpoint = resolveFileEndpoint(selectedFile.value.name)
+      if (!endpoint) {
+        setError('import.unsupportedFile')
+        return
       }
 
       const formData = new FormData()
       formData.append('file', selectedFile.value)
-      response = await gatewayFetch(resolveFileEndpoint(selectedFile.value.name), {
+      response = await gatewayFetch(endpoint, {
         method: 'POST',
         body: formData,
       })
@@ -201,7 +252,10 @@ async function importDataset() {
 
     datasetColumns.value = response
     datasetRows.value = columnarToRows(response)
-    statusMessage.value = `Imported ${datasetRows.value.length} rows from ${importSourceLabel(activeImporter.value)}.`
+    setStatus('import.importedStatus', {
+      rows: datasetRows.value.length,
+      source: importSourceLabel(activeImporter.value),
+    })
   } catch (error) {
     errorMessage.value = error.message
   } finally {
@@ -215,7 +269,8 @@ async function analyzeDataset() {
 
   try {
     if (!datasetRows.value.length) {
-      throw new Error('Import a dataset before running analysis.')
+      setError('analysis.needDataset')
+      return
     }
 
     const data = rowsToDatasetMap(datasetRows.value)
@@ -227,7 +282,7 @@ async function analyzeDataset() {
         target: targetField.value || null,
       }),
     })
-    statusMessage.value = `Analysis completed for ${datasetRows.value.length} rows.`
+    setStatus('analysis.completed', { rows: datasetRows.value.length })
   } catch (error) {
     errorMessage.value = error.message
   } finally {
@@ -237,7 +292,7 @@ async function analyzeDataset() {
 
 async function gatewayFetch(path, options = {}) {
   if (!authState.accessToken) {
-    throw new Error('Authenticate first.')
+    throw new Error(t('feedback.authFirst'))
   }
 
   const headers = new Headers(options.headers || {})
@@ -270,7 +325,7 @@ function resolveFileEndpoint(filename) {
   if (normalized.endsWith('.xlsx') || normalized.endsWith('.xls')) {
     return '/collector/import/xlsx-parser/xlsx'
   }
-  throw new Error('Unsupported file type. Use CSV, JSON, XML, XLSX or XLS.')
+  return null
 }
 
 function columnarToRows(payload) {
@@ -299,49 +354,109 @@ function normalizeError(payload) {
   if (typeof payload === 'string') {
     return payload
   }
-  return payload?.detail || payload?.message || 'Request failed.'
+  return payload?.detail || payload?.message || t('feedback.requestFailed')
 }
 
 function importSourceLabel(source) {
   if (source === 'jsonText') {
-    return 'JSON payload'
+    return t('import.sourceJson')
   }
   if (source === 'sql') {
-    return 'SQL source'
+    return t('import.sourceSql')
   }
-  return 'file upload'
+  return t('import.sourceFile')
 }
 
 function formatNumber(value) {
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return value
   }
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 }).format(value)
+  return new Intl.NumberFormat(numberLocale.value, { maximumFractionDigits: 3 }).format(value)
+}
+
+function formatValue(value) {
+  if (value === null || value === undefined) {
+    return '—'
+  }
+  if (value instanceof Date) {
+    return formatDate(value)
+  }
+  if (typeof value === 'string') {
+    const parsed = parseDateString(value)
+    if (parsed) {
+      return formatDate(parsed)
+    }
+  }
+  return value
+}
+
+function parseDateString(value) {
+  const hasDateMarkers = /[T:\-\.]/.test(value)
+  if (!hasDateMarkers) {
+    return null
+  }
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return null
+  }
+  return parsed
+}
+
+function formatDate(date) {
+  const pad = (num) => String(num).padStart(2, '0')
+  const hours = pad(date.getHours())
+  const minutes = pad(date.getMinutes())
+  const day = pad(date.getDate())
+  const month = pad(date.getMonth() + 1)
+  const year = date.getFullYear()
+  return `${hours}:${minutes} ${day}.${month}.${year}`
+}
+
+function formatGroupKey(bucket, key) {
+  if (bucket === 'hour') {
+    return `${key}:00`
+  }
+  if (bucket === 'weekday') {
+    return t(`results.weekdays.${key}`)
+  }
+  if (bucket === 'month') {
+    return t(`results.months.${key}`)
+  }
+  return key
 }
 </script>
 
 <template>
   <div class="shell">
     <section class="hero-panel">
-      <p class="eyebrow">Anasti Control Surface</p>
-      <h1>Import raw data, route it through the gateway, and inspect analysis without storing datasets.</h1>
+      <div class="hero-top">
+        <p class="eyebrow">{{ t('app.eyebrow') }}</p>
+        <label class="lang-switch">
+          <span>{{ t('language.label') }}</span>
+          <select :value="locale" @change="setLocale($event.target.value)">
+            <option v-for="lang in availableLocales" :key="lang" :value="lang">
+              {{ t(`language.${lang}`) }}
+            </option>
+          </select>
+        </label>
+      </div>
+      <h1>{{ t('app.headline') }}</h1>
       <p class="hero-copy">
-        Auth goes straight to the auth service. Every collector and analysis request goes through the API
-        gateway with the bearer token.
+        {{ t('app.heroCopy') }}
       </p>
 
       <div class="hero-grid">
         <article class="stat-card">
-          <span class="stat-label">Gateway</span>
+          <span class="stat-label">{{ t('app.gateway') }}</span>
           <strong>{{ gatewayBaseUrl }}</strong>
         </article>
         <article class="stat-card">
-          <span class="stat-label">Auth</span>
+          <span class="stat-label">{{ t('app.auth') }}</span>
           <strong>{{ authBaseUrl }}</strong>
         </article>
         <article class="stat-card">
-          <span class="stat-label">Session</span>
-          <strong>{{ isAuthenticated ? authState.email || 'Authenticated' : 'Anonymous' }}</strong>
+          <span class="stat-label">{{ t('app.session') }}</span>
+          <strong>{{ isAuthenticated ? authState.email || t('app.authenticated') : t('app.anonymous') }}</strong>
         </article>
       </div>
     </section>
@@ -350,9 +465,35 @@ function formatNumber(value) {
       <article class="panel auth-panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Step 1</p>
-            <h2>Authenticate</h2>
+            <p class="panel-kicker">{{ t('steps.step1') }}</p>
+            <h2>{{ t('auth.title') }}</h2>
           </div>
+        </div>
+
+        <form class="stack" @submit.prevent="submitAuth">
+          <label class="field">
+            <span>{{ t('auth.email') }}</span>
+            <input v-model="authForm.email" autocomplete="email" :placeholder="t('auth.emailPlaceholder')" type="email" />
+          </label>
+          <label class="field">
+            <span>{{ t('auth.password') }}</span>
+            <input
+              v-model="authForm.password"
+              autocomplete="current-password"
+              :placeholder="t('auth.passwordPlaceholder')"
+              type="password"
+            />
+          </label>
+
+          <div class="action-row">
+            <button class="primary-button" :disabled="loading" type="submit">
+              {{ loading ? t('auth.sending') : authMode === 'login' ? t('auth.enterWorkspace') : t('auth.createAccount') }}
+            </button>
+            <button class="ghost-button" :disabled="!isAuthenticated" type="button" @click="logout">
+              {{ t('auth.clearToken') }}
+            </button>
+          </div>
+
           <div class="chip-row">
             <button
               class="chip"
@@ -360,7 +501,7 @@ function formatNumber(value) {
               type="button"
               @click="authMode = 'login'"
             >
-              Login
+              {{ t('auth.login') }}
             </button>
             <button
               class="chip"
@@ -368,32 +509,7 @@ function formatNumber(value) {
               type="button"
               @click="authMode = 'register'"
             >
-              Register
-            </button>
-          </div>
-        </div>
-
-        <form class="stack" @submit.prevent="submitAuth">
-          <label class="field">
-            <span>Email</span>
-            <input v-model="authForm.email" autocomplete="email" placeholder="analyst@anasti.dev" type="email" />
-          </label>
-          <label class="field">
-            <span>Password</span>
-            <input
-              v-model="authForm.password"
-              autocomplete="current-password"
-              placeholder="Use your auth password"
-              type="password"
-            />
-          </label>
-
-          <div class="action-row">
-            <button class="primary-button" :disabled="loading" type="submit">
-              {{ loading ? 'Sending…' : authMode === 'login' ? 'Enter workspace' : 'Create account' }}
-            </button>
-            <button class="ghost-button" :disabled="!isAuthenticated" type="button" @click="logout">
-              Clear token
+              {{ t('auth.register') }}
             </button>
           </div>
         </form>
@@ -402,8 +518,8 @@ function formatNumber(value) {
       <article class="panel import-panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Step 2</p>
-            <h2>Import Dataset</h2>
+            <p class="panel-kicker">{{ t('steps.step2') }}</p>
+            <h2>{{ t('import.title') }}</h2>
           </div>
           <div class="chip-row">
             <button
@@ -412,7 +528,7 @@ function formatNumber(value) {
               type="button"
               @click="activeImporter = 'jsonText'"
             >
-              JSON
+              {{ t('import.json') }}
             </button>
             <button
               class="chip"
@@ -420,7 +536,7 @@ function formatNumber(value) {
               type="button"
               @click="activeImporter = 'file'"
             >
-              File
+              {{ t('import.file') }}
             </button>
             <button
               class="chip"
@@ -428,67 +544,67 @@ function formatNumber(value) {
               type="button"
               @click="activeImporter = 'sql'"
             >
-              SQL
+              {{ t('import.sql') }}
             </button>
           </div>
         </div>
 
         <div v-if="activeImporter === 'jsonText'" class="stack">
           <label class="field">
-            <span>JSON payload</span>
+            <span>{{ t('import.jsonPayload') }}</span>
             <textarea v-model="jsonText" rows="12" spellcheck="false" />
           </label>
         </div>
 
         <div v-else-if="activeImporter === 'file'" class="stack">
           <label class="field">
-            <span>File source</span>
+            <span>{{ t('import.fileSource') }}</span>
             <input
               accept=".csv,.json,.xml,.xlsx,.xls"
               type="file"
               @change="selectedFile = $event.target.files?.[0] || null"
             />
           </label>
-          <p class="hint">Supported: CSV, JSON, XML, XLSX, XLS.</p>
+          <p class="hint">{{ t('import.fileHint') }}</p>
         </div>
 
         <div v-else class="stack sql-grid">
           <label class="field">
-            <span>DB type</span>
+            <span>{{ t('import.dbType') }}</span>
             <select v-model="sqlForm.db_type">
               <option value="sqlite">SQLite</option>
               <option value="postgresql">PostgreSQL</option>
             </select>
           </label>
           <label class="field">
-            <span>Host</span>
+            <span>{{ t('import.host') }}</span>
             <input v-model="sqlForm.host" placeholder="localhost" type="text" />
           </label>
           <label class="field">
-            <span>Port</span>
+            <span>{{ t('import.port') }}</span>
             <input v-model="sqlForm.port" placeholder="5432" type="text" />
           </label>
           <label class="field">
-            <span>Database / path</span>
+            <span>{{ t('import.database') }}</span>
             <input v-model="sqlForm.database" placeholder="/tmp/data.db or app" type="text" />
           </label>
           <label class="field">
-            <span>Username</span>
+            <span>{{ t('import.username') }}</span>
             <input v-model="sqlForm.username" placeholder="postgres" type="text" />
           </label>
           <label class="field">
-            <span>Password</span>
+            <span>{{ t('import.password') }}</span>
             <input v-model="sqlForm.password" placeholder="secret" type="password" />
           </label>
           <label class="field field-wide">
-            <span>Query</span>
+            <span>{{ t('import.query') }}</span>
             <textarea v-model="sqlForm.query" rows="6" spellcheck="false" />
           </label>
         </div>
 
         <div class="action-row">
           <button class="primary-button" :disabled="importLoading || !isAuthenticated" type="button" @click="importDataset">
-            {{ importLoading ? 'Importing…' : 'Import through gateway' }}
+            {{ importLoading ? t('import.importing') : t('import.importButton') }}
           </button>
         </div>
       </article>
@@ -496,16 +612,16 @@ function formatNumber(value) {
       <article class="panel analysis-panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Step 3</p>
-            <h2>Run Analysis</h2>
+            <p class="panel-kicker">{{ t('steps.step3') }}</p>
+            <h2>{{ t('analysis.title') }}</h2>
           </div>
         </div>
 
         <div class="stack">
           <label class="field">
-            <span>Target field for grouping</span>
+            <span>{{ t('analysis.targetField') }}</span>
             <select v-model="targetField">
-              <option value="">No grouping</option>
+              <option value="">{{ t('analysis.noGrouping') }}</option>
               <option v-for="column in availableColumns" :key="column" :value="column">
                 {{ column }}
               </option>
@@ -519,7 +635,7 @@ function formatNumber(value) {
               type="button"
               @click="analyzeDataset"
             >
-              {{ analysisLoading ? 'Analyzing…' : 'Run analysis' }}
+              {{ analysisLoading ? t('analysis.analyzing') : t('analysis.analyze') }}
             </button>
           </div>
         </div>
@@ -534,10 +650,10 @@ function formatNumber(value) {
       <article class="panel preview-panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Dataset</p>
-            <h2>Preview</h2>
+            <p class="panel-kicker">{{ t('results.dataset') }}</p>
+            <h2>{{ t('results.preview') }}</h2>
           </div>
-          <strong class="badge">{{ datasetRows.length }} rows</strong>
+          <strong class="badge">{{ t('results.rows', { count: datasetRows.length }) }}</strong>
         </div>
 
         <div v-if="previewRows.length" class="table-shell">
@@ -549,58 +665,76 @@ function formatNumber(value) {
             </thead>
             <tbody>
               <tr v-for="(row, index) in previewRows" :key="index">
-                <td v-for="column in previewColumns" :key="column">{{ row[column] }}</td>
+                <td v-for="column in previewColumns" :key="column">{{ formatValue(row[column]) }}</td>
               </tr>
             </tbody>
           </table>
         </div>
-        <p v-else class="empty-state">No dataset loaded yet.</p>
+        <p v-else class="empty-state">{{ t('results.emptyDataset') }}</p>
       </article>
 
       <article class="panel summary-panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Analysis</p>
-            <h2>Summary</h2>
+            <p class="panel-kicker">{{ t('results.analysis') }}</p>
+            <h2>{{ t('results.summary') }}</h2>
           </div>
-          <strong class="badge">{{ analysisResult?.summary?.row_count || 0 }} analyzed</strong>
+          <strong class="badge">{{ t('results.analyzed', { count: analysisResult?.summary?.row_count || 0 }) }}</strong>
         </div>
 
         <div v-if="analysisResult" class="summary-stack">
           <section class="metric-group">
-            <h3>Numeric fields</h3>
+            <h3>{{ t('results.numericFields') }}</h3>
+            <p class="helper">{{ t('results.numericHelp') }}</p>
             <div class="metric-grid">
               <article v-for="[column, values] in numericSummaryEntries" :key="column" class="metric-card">
                 <h4>{{ column }}</h4>
-                <p>Mean {{ formatNumber(values.mean) }}</p>
-                <p>Median {{ formatNumber(values.median) }}</p>
-                <p>Std {{ formatNumber(values.std) }}</p>
-                <p>Range {{ formatNumber(values.min) }} to {{ formatNumber(values.max) }}</p>
+                <p>{{ t('results.mean') }} {{ formatNumber(values.mean) }}</p>
+                <p class="helper">{{ t('results.meanHelp') }}</p>
+                <p>{{ t('results.median') }} {{ formatNumber(values.median) }}</p>
+                <p class="helper">{{ t('results.medianHelp') }}</p>
+                <p>{{ t('results.std') }} {{ formatNumber(values.std) }}</p>
+                <p class="helper">{{ t('results.stdHelp') }}</p>
+                <p>
+                  {{
+                    t('results.range', {
+                      min: formatNumber(values.min),
+                      max: formatNumber(values.max),
+                    })
+                  }}
+                </p>
+                <p class="helper">{{ t('results.rangeHelp') }}</p>
               </article>
             </div>
           </section>
 
           <section class="metric-group">
-            <h3>Categorical fields</h3>
+            <h3>{{ t('results.categoricalFields') }}</h3>
+            <p class="helper">{{ t('results.categoricalHelp') }}</p>
             <div class="metric-grid">
               <article v-for="[column, values] in categoricalSummaryEntries" :key="column" class="metric-card">
                 <h4>{{ column }}</h4>
-                <p>Unique {{ values.unique_values.length }}</p>
+                <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
                 <p>
-                  Top:
-                  {{ values.top_values.map((item) => `${item.value} (${item.count})`).join(', ') }}
+                  {{ t('results.top') }}:
+                  {{
+                    values.top_values
+                      .map((item) => `${formatValue(item.value)} (${item.count})`)
+                      .join(', ')
+                  }}
                 </p>
               </article>
             </div>
           </section>
 
           <section class="metric-group">
-            <h3>Correlation matrix</h3>
+            <h3>{{ t('results.correlation') }}</h3>
+            <p class="helper">{{ t('results.correlationHelp') }}</p>
             <div class="table-shell compact">
               <table>
                 <thead>
                   <tr>
-                    <th>Field</th>
+                    <th>{{ t('results.field') }}</th>
                     <th v-for="[column] in correlationEntries" :key="column">{{ column }}</th>
                   </tr>
                 </thead>
@@ -616,21 +750,24 @@ function formatNumber(value) {
             </div>
           </section>
 
-          <section v-if="groupedEntries.length" class="metric-group">
-            <h3>Target groups</h3>
-            <div class="metric-grid">
-              <article v-for="[groupName, details] in groupedEntries" :key="groupName" class="metric-card">
-                <h4>{{ groupName }}</h4>
-                <p>Rows {{ details.rows.length }}</p>
-                <p>
-                  Numeric fields {{ Object.keys(details.summary.numeric || {}).length }},
-                  categories {{ Object.keys(details.summary.categorical || {}).length }}
-                </p>
-              </article>
+          <section v-if="groupedBuckets.length" class="metric-group">
+            <h3>{{ t('results.targetGroups') }}</h3>
+            <div v-for="bucket in groupedBuckets" :key="bucket.label" class="group-bucket">
+              <h4 class="bucket-title">{{ bucket.label }}</h4>
+              <div class="metric-grid">
+                <article v-for="[groupName, details] in bucket.groups" :key="groupName" class="metric-card">
+                  <h4>{{ formatGroupKey(bucket.bucket, groupName) }}</h4>
+                  <p>{{ t('results.rowsLabel') }} {{ details.rows.length }}</p>
+                  <p>
+                    {{ t('results.numericFieldsLabel') }} {{ Object.keys(details.summary.numeric || {}).length }},
+                    {{ t('results.categoriesLabel') }} {{ Object.keys(details.summary.categorical || {}).length }}
+                  </p>
+                </article>
+              </div>
             </div>
           </section>
         </div>
-        <p v-else class="empty-state">Analysis results will appear here.</p>
+        <p v-else class="empty-state">{{ t('results.analysisEmpty') }}</p>
       </article>
     </section>
   </div>

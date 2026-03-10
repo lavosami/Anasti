@@ -28,6 +28,34 @@
   box-shadow: var(--shadow-lg);
 }
 
+.hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.lang-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  font-size: 0.78rem;
+  color: var(--ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+
+.lang-switch select {
+  min-width: 140px;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-line);
+  background: var(--surface-strong);
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
 .hero-panel::after {
   content: '';
   position: absolute;
@@ -267,6 +295,25 @@ thead th {
 .summary-stack {
   display: grid;
   gap: 1rem;
+}
+
+.helper {
+  margin: 0.1rem 0 0.6rem;
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+}
+
+.group-bucket {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.bucket-title {
+  margin: 0;
+  font-size: 0.95rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
 }
 
 .metric-group {
