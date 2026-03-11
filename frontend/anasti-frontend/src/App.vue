@@ -1,5 +1,6 @@
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import * as echarts from 'echarts'
 import { useI18n } from './i18n'
 
 const { locale, setLocale, t, availableLocales } = useI18n()
@@ -67,39 +68,169 @@ const categoricalSummaryEntries = computed(() =>
 const correlationEntries = computed(() =>
   analysisResult.value ? Object.entries(analysisResult.value.summary.correlation || {}) : [],
 )
-const groupedBuckets = computed(() => {
-  const groups = analysisResult.value?.groups
-  if (!groups) {
-    return []
-  }
-  const values = Object.values(groups)
-  if (!values.length) {
-    return []
-  }
-
-  if (values[0]?.rows) {
-    return [
-      {
-        label: t('results.groupDefault'),
-        groups: Object.entries(groups),
-        bucket: 'default',
-      },
-    ]
-  }
-
-  return Object.entries(groups).map(([bucket, bucketGroups]) => ({
-    label: t(`results.groupBuckets.${bucket}`) || bucket,
-    groups: Object.entries(bucketGroups),
-    bucket,
-  }))
-})
+const selectedNumericField = ref('')
+const selectedCategoricalField = ref('')
+const selectedCorrelationField = ref('')
 const previewRows = computed(() => datasetRows.value.slice(0, 8))
-const previewColumns = computed(() => availableColumns.value.slice(0, 8))
+const previewColumns = computed(() => availableColumns.value)
 const numberLocale = computed(() => (locale.value === 'ru' ? 'ru-RU' : 'en-US'))
+const numericColumns = computed(() =>
+  availableColumns.value.filter((column) => {
+    const numericValues = datasetRows.value
+      .map((row) => asNumber(row[column]))
+      .filter((value) => Number.isFinite(value))
+    return numericValues.length > 1
+  }),
+)
+
+const chartPalette = ['#ff6b3d', '#1c7ed6', '#f59f00', '#20c997', '#e64980', '#5c7cfa', '#fab005', '#12b886']
+const chartConfig = reactive({
+  scatterX: '',
+  scatterY: '',
+  pieCategory: '',
+  pieValue: '',
+  pieMode: 'count',
+})
+const chartRefs = {
+  scatter: ref(null),
+  pie: ref(null),
+}
+const chartInstances = reactive({
+  scatter: null,
+  pie: null,
+})
+
+const scatterSeries = computed(() => {
+  if (!chartConfig.scatterX || !chartConfig.scatterY) {
+    return {
+      points: [],
+      xMin: 0,
+      xMax: 0,
+      yMin: 0,
+      yMax: 0,
+      xType: 'value',
+      yType: 'value',
+      xCategories: [],
+      yCategories: [],
+      trend: null,
+    }
+  }
+
+  const xInfo = buildAxisInfo(chartConfig.scatterX)
+  const yInfo = buildAxisInfo(chartConfig.scatterY)
+
+  const points = []
+  const numericPoints = []
+
+  for (const row of datasetRows.value) {
+    const xRaw = row[chartConfig.scatterX]
+    const yRaw = row[chartConfig.scatterY]
+    const xVal = xInfo.type === 'value' ? asNumber(xRaw) : formatValue(xRaw)
+    const yVal = yInfo.type === 'value' ? asNumber(yRaw) : formatValue(yRaw)
+
+    if (xInfo.type === 'value' && !Number.isFinite(xVal)) {
+      continue
+    }
+    if (yInfo.type === 'value' && !Number.isFinite(yVal)) {
+      continue
+    }
+    if (xInfo.type === 'category' && xVal === '—') {
+      continue
+    }
+    if (yInfo.type === 'category' && yVal === '—') {
+      continue
+    }
+
+    points.push([xVal, yVal])
+    if (xInfo.type === 'value' && yInfo.type === 'value') {
+      numericPoints.push([xVal, yVal])
+    }
+  }
+
+  if (!points.length) {
+    return {
+      points: [],
+      xMin: 0,
+      xMax: 0,
+      yMin: 0,
+      yMax: 0,
+      xType: xInfo.type,
+      yType: yInfo.type,
+      xCategories: xInfo.categories,
+      yCategories: yInfo.categories,
+      trend: null,
+    }
+  }
+
+  const xMin = xInfo.type === 'value' ? Math.min(...numericPoints.map((point) => point[0])) : 0
+  const xMax = xInfo.type === 'value' ? Math.max(...numericPoints.map((point) => point[0])) : 0
+  const yMin = yInfo.type === 'value' ? Math.min(...numericPoints.map((point) => point[1])) : 0
+  const yMax = yInfo.type === 'value' ? Math.max(...numericPoints.map((point) => point[1])) : 0
+
+  const trend = xInfo.type === 'value' && yInfo.type === 'value' ? buildTrendline(numericPoints) : null
+
+  return {
+    points,
+    xMin,
+    xMax,
+    yMin,
+    yMax,
+    xType: xInfo.type,
+    yType: yInfo.type,
+    xCategories: xInfo.categories,
+    yCategories: yInfo.categories,
+    trend,
+  }
+})
+
+const pieData = computed(() => {
+  if (!chartConfig.pieCategory) {
+    return { slices: [], total: 0 }
+  }
+
+  const bucket = new Map()
+  const useSum = chartConfig.pieMode === 'sum' && chartConfig.pieValue
+
+  for (const row of datasetRows.value) {
+    const label = formatValue(row[chartConfig.pieCategory])
+    if (label === '—') {
+      continue
+    }
+    const current = bucket.get(label) || 0
+    if (useSum) {
+      const numeric = asNumber(row[chartConfig.pieValue])
+      if (Number.isFinite(numeric)) {
+        bucket.set(label, current + numeric)
+      }
+    } else {
+      bucket.set(label, current + 1)
+    }
+  }
+
+  const series = Array.from(bucket.entries())
+    .map(([label, value]) => ({ label, value }))
+    .filter((item) => item.value > 0)
+    .sort((a, b) => b.value - a.value)
+
+  const total = series.reduce((sum, item) => sum + item.value, 0)
+  if (!total) {
+    return { slices: [], total: 0 }
+  }
+
+  const slices = series.map((item, index) => ({
+    ...item,
+    color: chartPalette[index % chartPalette.length],
+  }))
+
+  return { slices, total }
+})
 
 watch(availableColumns, (columns) => {
   if (!columns.length) {
     targetField.value = ''
+    chartConfig.pieCategory = ''
+    chartConfig.scatterX = ''
+    chartConfig.scatterY = ''
     return
   }
 
@@ -113,12 +244,147 @@ watch(availableColumns, (columns) => {
         return uniqueCount > 1 && uniqueCount <= Math.min(sample.length, 12)
       }) || ''
   }
+
+  if (!columns.includes(chartConfig.pieCategory)) {
+    chartConfig.pieCategory = columns[0] || ''
+  }
+
+  if (!columns.includes(chartConfig.scatterX)) {
+    chartConfig.scatterX = columns[0] || ''
+  }
+  if (!columns.includes(chartConfig.scatterY)) {
+    chartConfig.scatterY = columns[1] || columns[0] || ''
+  }
+  if (chartConfig.scatterX === chartConfig.scatterY && columns.length > 1) {
+    chartConfig.scatterY = columns.find((column) => column !== chartConfig.scatterX) || columns[0]
+  }
 })
+
+watch(numericSummaryEntries, (entries) => {
+  if (!entries.length) {
+    selectedNumericField.value = ''
+    return
+  }
+  if (!entries.find(([key]) => key === selectedNumericField.value)) {
+    selectedNumericField.value = entries[0][0]
+  }
+})
+
+watch(categoricalSummaryEntries, (entries) => {
+  if (!entries.length) {
+    selectedCategoricalField.value = ''
+    return
+  }
+  if (!entries.find(([key]) => key === selectedCategoricalField.value)) {
+    selectedCategoricalField.value = entries[0][0]
+  }
+})
+
+watch(correlationEntries, (entries) => {
+  if (!entries.length) {
+    selectedCorrelationField.value = ''
+    return
+  }
+  if (!entries.find(([key]) => key === selectedCorrelationField.value)) {
+    selectedCorrelationField.value = entries[0][0]
+  }
+})
+
+watch(numericColumns, (columns) => {
+  if (!columns.length) {
+    chartConfig.pieValue = ''
+    if (chartConfig.pieMode === 'sum') {
+      chartConfig.pieMode = 'count'
+    }
+    return
+  }
+
+  if (!columns.includes(chartConfig.pieValue)) {
+    chartConfig.pieValue = columns[0]
+  }
+})
+
+const groupOptions = computed(() => {
+  const groups = analysisResult.value?.groups
+  if (!groups) {
+    return []
+  }
+  const values = Object.values(groups)
+  if (!values.length) {
+    return []
+  }
+
+  if (values[0]?.rows) {
+    return Object.entries(groups).map(([groupName, details]) => ({
+      key: `default:${groupName}`,
+      label: formatGroupKey('default', groupName),
+      details,
+    }))
+  }
+
+  return Object.entries(groups).flatMap(([bucket, bucketGroups]) => {
+    const bucketLabel = t(`results.groupBuckets.${bucket}`) || bucket
+    return Object.entries(bucketGroups).map(([groupName, details]) => ({
+      key: `${bucket}:${groupName}`,
+      label: `${bucketLabel}: ${formatGroupKey(bucket, groupName)}`,
+      details,
+    }))
+  })
+})
+const selectedGroupKey = ref('')
+const selectedGroup = computed(() => groupOptions.value.find((option) => option.key === selectedGroupKey.value) || null)
+
+watch(groupOptions, (options) => {
+  if (!options.length) {
+    selectedGroupKey.value = ''
+    return
+  }
+  if (!options.find((option) => option.key === selectedGroupKey.value)) {
+    selectedGroupKey.value = options[0].key
+  }
+})
+
+const handleResize = () => {
+  Object.values(chartInstances).forEach((instance) => {
+    if (instance) {
+      instance.resize()
+    }
+  })
+}
+
+onMounted(() => {
+  nextTick(() => {
+    renderScatterChart()
+    renderPieChart()
+  })
+  window.addEventListener('resize', handleResize)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+  destroyChart('scatter')
+  destroyChart('pie')
+})
+
+watch(scatterSeries, () => nextTick(renderScatterChart), { deep: true })
+watch(pieData, () => nextTick(renderPieChart), { deep: true })
+watch(
+  () => [chartConfig.scatterX, chartConfig.scatterY],
+  () => nextTick(renderScatterChart),
+)
+watch(
+  () => [chartConfig.pieCategory, chartConfig.pieValue, chartConfig.pieMode],
+  () => nextTick(renderPieChart),
+)
 
 watch(locale, () => {
   if (!errorMessage.value) {
     statusMessage.value = t('feedback.initial')
   }
+  nextTick(() => {
+    renderScatterChart()
+    renderPieChart()
+  })
 })
 
 function loadStoredAuth() {
@@ -372,6 +638,233 @@ function formatNumber(value) {
     return value
   }
   return new Intl.NumberFormat(numberLocale.value, { maximumFractionDigits: 3 }).format(value)
+}
+
+function asNumber(value) {
+  if (value === null || value === undefined || value === '') {
+    return NaN
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : NaN
+  }
+  if (typeof value === 'boolean') {
+    return value ? 1 : 0
+  }
+  if (typeof value === 'string') {
+    const normalized = value.replace(/\s/g, '').replace(',', '.')
+    const parsed = Number(normalized)
+    return Number.isFinite(parsed) ? parsed : NaN
+  }
+  return NaN
+}
+
+function buildAxisInfo(column) {
+  const values = datasetRows.value.map((row) => row[column]).filter((value) => value !== null && value !== undefined)
+  if (!values.length) {
+    return { type: 'value', categories: [] }
+  }
+
+  const numericValues = values.map((value) => asNumber(value)).filter((value) => Number.isFinite(value))
+  const nonNumericCount = values.filter((value) => !Number.isFinite(asNumber(value))).length
+
+  if (numericValues.length && nonNumericCount === 0) {
+    return { type: 'value', categories: [] }
+  }
+
+  const seen = new Set()
+  const categories = []
+  for (const value of values) {
+    const label = formatValue(value)
+    if (label === '—' || seen.has(label)) {
+      continue
+    }
+    seen.add(label)
+    categories.push(label)
+  }
+
+  return { type: 'category', categories }
+}
+
+function buildTrendline(points) {
+  if (!points.length) {
+    return null
+  }
+
+  const finite = points.filter((point) => Number.isFinite(point[0]) && Number.isFinite(point[1]))
+  if (finite.length < 2) {
+    return null
+  }
+
+  let sumX = 0
+  let sumY = 0
+  let sumXY = 0
+  let sumXX = 0
+  for (const [x, y] of finite) {
+    sumX += x
+    sumY += y
+    sumXY += x * y
+    sumXX += x * x
+  }
+  const n = finite.length
+  const denominator = n * sumXX - sumX * sumX
+  if (denominator === 0) {
+    return null
+  }
+  const slope = (n * sumXY - sumX * sumY) / denominator
+  const intercept = (sumY - slope * sumX) / n
+  const xMin = Math.min(...finite.map((point) => point[0]))
+  const xMax = Math.max(...finite.map((point) => point[0]))
+
+  return [
+    [xMin, slope * xMin + intercept],
+    [xMax, slope * xMax + intercept],
+  ]
+}
+
+function truncateLabel(value, max = 15) {
+  if (value === null || value === undefined) {
+    return ''
+  }
+  const text = String(value)
+  if (text.length <= max) {
+    return text
+  }
+  return `${text.slice(0, max - 1)}…`
+}
+
+function axisLabelOptions(isCategory) {
+  if (!isCategory) {
+    return undefined
+  }
+  return {
+    interval: 0,
+    rotate: 45,
+    margin: 14,
+    align: 'right',
+    verticalAlign: 'middle',
+    hideOverlap: true,
+    width: 120,
+    overflow: 'truncate',
+    formatter: (value) => truncateLabel(value),
+  }
+}
+
+function destroyChart(name) {
+  if (chartInstances[name]) {
+    chartInstances[name].dispose()
+    chartInstances[name] = null
+  }
+}
+
+function initChart(name) {
+  const el = chartRefs[name]?.value
+  if (!el) {
+    return null
+  }
+
+  if (chartInstances[name] && chartInstances[name].getDom() !== el) {
+    destroyChart(name)
+  }
+
+  if (!chartInstances[name]) {
+    chartInstances[name] = echarts.init(el)
+  }
+
+  return chartInstances[name]
+}
+
+function renderScatterChart() {
+  if (!scatterSeries.value.points.length) {
+    destroyChart('scatter')
+    return
+  }
+
+  const instance = initChart('scatter')
+  if (!instance) {
+    return
+  }
+
+  const isXCategory = scatterSeries.value.xType === 'category'
+  const isYCategory = scatterSeries.value.yType === 'category'
+
+  instance.setOption(
+    {
+      tooltip: { trigger: 'item' },
+      grid: {
+        left: isYCategory ? 120 : 48,
+        right: 24,
+        top: 24,
+        bottom: isXCategory ? 110 : 36,
+      },
+      xAxis: {
+        type: scatterSeries.value.xType,
+        name: chartConfig.scatterX,
+        nameGap: 22,
+        nameLocation: 'middle',
+        data: scatterSeries.value.xType === 'category' ? scatterSeries.value.xCategories : undefined,
+        axisLabel: axisLabelOptions(isXCategory),
+      },
+      yAxis: {
+        type: scatterSeries.value.yType,
+        name: chartConfig.scatterY,
+        nameGap: 30,
+        nameLocation: 'middle',
+        data: scatterSeries.value.yType === 'category' ? scatterSeries.value.yCategories : undefined,
+        axisLabel: axisLabelOptions(isYCategory),
+      },
+      series: [
+        {
+          type: 'scatter',
+          data: scatterSeries.value.points,
+          symbolSize: 8,
+          itemStyle: { color: '#1c7ed6' },
+        },
+        ...(scatterSeries.value.trend
+          ? [
+              {
+                type: 'line',
+                data: scatterSeries.value.trend,
+                showSymbol: false,
+                lineStyle: { width: 2, type: 'dashed', color: '#ff6b3d' },
+              },
+            ]
+          : []),
+      ],
+    },
+    true,
+  )
+}
+
+function renderPieChart() {
+  if (!pieData.value.slices.length) {
+    destroyChart('pie')
+    return
+  }
+
+  const instance = initChart('pie')
+  if (!instance) {
+    return
+  }
+
+  instance.setOption(
+    {
+      tooltip: { trigger: 'item' },
+      series: [
+        {
+          type: 'pie',
+          radius: ['30%', '70%'],
+          label: { show: false },
+          labelLine: { show: false },
+          data: pieData.value.slices.map((slice) => ({
+            name: slice.label,
+            value: slice.value,
+            itemStyle: { color: slice.color },
+          })),
+        },
+      ],
+    },
+    true,
+  )
 }
 
 function formatValue(value) {
@@ -686,8 +1179,20 @@ function formatGroupKey(bucket, key) {
           <section class="metric-group">
             <h3>{{ t('results.numericFields') }}</h3>
             <p class="helper">{{ t('results.numericHelp') }}</p>
+            <label class="field">
+              <span>{{ t('results.numericSelect') }}</span>
+              <select v-model="selectedNumericField">
+                <option v-for="[column] in numericSummaryEntries" :key="column" :value="column">
+                  {{ column }}
+                </option>
+              </select>
+            </label>
             <div class="metric-grid">
-              <article v-for="[column, values] in numericSummaryEntries" :key="column" class="metric-card">
+              <article
+                v-for="[column, values] in numericSummaryEntries.filter(([key]) => key === selectedNumericField)"
+                :key="column"
+                class="metric-card"
+              >
                 <h4>{{ column }}</h4>
                 <p>{{ t('results.mean') }} {{ formatNumber(values.mean) }}</p>
                 <p class="helper">{{ t('results.meanHelp') }}</p>
@@ -711,8 +1216,20 @@ function formatGroupKey(bucket, key) {
           <section class="metric-group">
             <h3>{{ t('results.categoricalFields') }}</h3>
             <p class="helper">{{ t('results.categoricalHelp') }}</p>
+            <label class="field">
+              <span>{{ t('results.categoricalSelect') }}</span>
+              <select v-model="selectedCategoricalField">
+                <option v-for="[column] in categoricalSummaryEntries" :key="column" :value="column">
+                  {{ column }}
+                </option>
+              </select>
+            </label>
             <div class="metric-grid">
-              <article v-for="[column, values] in categoricalSummaryEntries" :key="column" class="metric-card">
+              <article
+                v-for="[column, values] in categoricalSummaryEntries.filter(([key]) => key === selectedCategoricalField)"
+                :key="column"
+                class="metric-card"
+              >
                 <h4>{{ column }}</h4>
                 <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
                 <p>
@@ -730,6 +1247,14 @@ function formatGroupKey(bucket, key) {
           <section class="metric-group">
             <h3>{{ t('results.correlation') }}</h3>
             <p class="helper">{{ t('results.correlationHelp') }}</p>
+            <label class="field">
+              <span>{{ t('results.correlationSelect') }}</span>
+              <select v-model="selectedCorrelationField">
+                <option v-for="[column] in correlationEntries" :key="column" :value="column">
+                  {{ column }}
+                </option>
+              </select>
+            </label>
             <div class="table-shell compact">
               <table>
                 <thead>
@@ -739,7 +1264,10 @@ function formatGroupKey(bucket, key) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="[rowKey, rowValues] in correlationEntries" :key="rowKey">
+                  <tr
+                    v-for="[rowKey, rowValues] in correlationEntries.filter(([key]) => key === selectedCorrelationField)"
+                    :key="rowKey"
+                  >
                     <th>{{ rowKey }}</th>
                     <td v-for="[column] in correlationEntries" :key="column">
                       {{ formatNumber(rowValues[column]) }}
@@ -750,24 +1278,127 @@ function formatGroupKey(bucket, key) {
             </div>
           </section>
 
-          <section v-if="groupedBuckets.length" class="metric-group">
+          <section v-if="groupOptions.length" class="metric-group">
             <h3>{{ t('results.targetGroups') }}</h3>
-            <div v-for="bucket in groupedBuckets" :key="bucket.label" class="group-bucket">
-              <h4 class="bucket-title">{{ bucket.label }}</h4>
-              <div class="metric-grid">
-                <article v-for="[groupName, details] in bucket.groups" :key="groupName" class="metric-card">
-                  <h4>{{ formatGroupKey(bucket.bucket, groupName) }}</h4>
-                  <p>{{ t('results.rowsLabel') }} {{ details.rows.length }}</p>
-                  <p>
-                    {{ t('results.numericFieldsLabel') }} {{ Object.keys(details.summary.numeric || {}).length }},
-                    {{ t('results.categoriesLabel') }} {{ Object.keys(details.summary.categorical || {}).length }}
-                  </p>
-                </article>
-              </div>
+            <label class="field">
+              <span>{{ t('results.groupSelect') }}</span>
+              <select v-model="selectedGroupKey">
+                <option v-for="option in groupOptions" :key="option.key" :value="option.key">
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+
+            <div v-if="selectedGroup" class="metric-grid">
+              <article class="metric-card">
+                <h4>{{ selectedGroup.label }}</h4>
+                <p>{{ t('results.rowsLabel') }} {{ selectedGroup.details.rows.length }}</p>
+                <p>
+                  {{ t('results.numericFieldsLabel') }}
+                  {{ Object.keys(selectedGroup.details.summary.numeric || {}).length }},
+                  {{ t('results.categoriesLabel') }}
+                  {{ Object.keys(selectedGroup.details.summary.categorical || {}).length }}
+                </p>
+              </article>
             </div>
           </section>
         </div>
         <p v-else class="empty-state">{{ t('results.analysisEmpty') }}</p>
+      </article>
+    </section>
+
+    <section class="charts-grid">
+      <article class="panel chart-panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">{{ t('charts.kicker') }}</p>
+            <h2>{{ t('charts.title') }}</h2>
+          </div>
+          <strong class="badge">{{ t('charts.rows', { count: datasetRows.length }) }}</strong>
+        </div>
+
+        <div v-if="datasetRows.length" class="chart-grid">
+          <article class="chart-card">
+            <div class="chart-head">
+              <h3>{{ t('charts.scatterTitle') }}</h3>
+              <p class="helper">{{ t('charts.scatterHelp') }}</p>
+            </div>
+
+            <div class="chart-controls">
+              <label class="field">
+                <span>{{ t('charts.scatterX') }}</span>
+                <select v-model="chartConfig.scatterX">
+                  <option v-for="column in availableColumns" :key="column" :value="column">
+                    {{ column }}
+                  </option>
+                </select>
+              </label>
+              <label class="field">
+                <span>{{ t('charts.scatterY') }}</span>
+                <select v-model="chartConfig.scatterY">
+                  <option v-for="column in availableColumns" :key="column" :value="column">
+                    {{ column }}
+                  </option>
+                </select>
+              </label>
+            </div>
+
+            <div class="chart-visual">
+              <div v-if="scatterSeries.points.length" :ref="chartRefs.scatter" class="chart-canvas" />
+              <p v-else class="empty-state">{{ t('charts.noNumeric') }}</p>
+            </div>
+
+            <div v-if="scatterSeries.points.length && scatterSeries.xType === 'value' && scatterSeries.yType === 'value'" class="chart-meta">
+              <span>
+                {{ t('charts.rangeX', { min: formatNumber(scatterSeries.xMin), max: formatNumber(scatterSeries.xMax) }) }}
+              </span>
+              <span>
+                {{ t('charts.rangeY', { min: formatNumber(scatterSeries.yMin), max: formatNumber(scatterSeries.yMax) }) }}
+              </span>
+            </div>
+          </article>
+
+          <article class="chart-card">
+            <div class="chart-head">
+              <h3>{{ t('charts.pieTitle') }}</h3>
+              <p class="helper">{{ t('charts.pieHelp') }}</p>
+            </div>
+
+            <div class="chart-controls">
+              <label class="field">
+                <span>{{ t('charts.pieCategory') }}</span>
+                <select v-model="chartConfig.pieCategory">
+                  <option v-for="column in availableColumns" :key="column" :value="column">
+                    {{ column }}
+                  </option>
+                </select>
+              </label>
+              <label class="field">
+                <span>{{ t('charts.pieMode') }}</span>
+                <select v-model="chartConfig.pieMode">
+                  <option value="count">{{ t('charts.pieCount') }}</option>
+                  <option value="sum">{{ t('charts.pieSum') }}</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>{{ t('charts.pieValue') }}</span>
+                <select v-model="chartConfig.pieValue" :disabled="chartConfig.pieMode !== 'sum'">
+                  <option v-for="column in numericColumns" :key="column" :value="column">
+                    {{ column }}
+                  </option>
+                </select>
+              </label>
+            </div>
+
+            <div class="chart-visual">
+              <div v-if="pieData.slices.length" :ref="chartRefs.pie" class="chart-canvas" />
+              <p v-else class="empty-state">{{ t('charts.noCategory') }}</p>
+            </div>
+
+          </article>
+        </div>
+
+        <p v-else class="empty-state">{{ t('charts.empty') }}</p>
       </article>
     </section>
   </div>
