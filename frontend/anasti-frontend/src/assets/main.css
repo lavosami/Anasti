@@ -270,6 +270,28 @@
   grid-auto-columns: 1fr;
 }
 
+.group-checkboxes {
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.checkbox-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid rgba(16, 32, 51, 0.08);
+  background: rgba(16, 32, 51, 0.04);
+  color: var(--ink-strong);
+}
+
+.checkbox-chip input {
+  width: 1rem;
+  height: 1rem;
+}
+
 .chip,
 .primary-button,
 .ghost-button {

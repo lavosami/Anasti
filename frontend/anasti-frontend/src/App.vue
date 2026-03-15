@@ -331,16 +331,96 @@ const groupOptions = computed(() => {
     }))
   })
 })
-const selectedGroupKey = ref('')
-const selectedGroup = computed(() => groupOptions.value.find((option) => option.key === selectedGroupKey.value) || null)
+const selectedGroupKeys = ref([])
+const selectedGroups = computed(() => groupOptions.value.filter((option) => selectedGroupKeys.value.includes(option.key)))
+const selectedGroupLabels = computed(() => selectedGroups.value.map((group) => group.label).join(', '))
+const selectedGroupRows = computed(() =>
+  selectedGroups.value.flatMap((group) => group.details?.rows || []),
+)
+const selectedGroupRowCount = computed(() => selectedGroupRows.value.length)
+const groupSelectionSummary = ref(null)
+const groupSelectionLoading = ref(false)
+const groupNumericEntries = computed(() =>
+  groupSelectionSummary.value ? Object.entries(groupSelectionSummary.value.numeric || {}) : [],
+)
+const groupCategoricalEntries = computed(() =>
+  groupSelectionSummary.value ? Object.entries(groupSelectionSummary.value.categorical || {}) : [],
+)
+const groupCorrelationEntries = computed(() =>
+  groupSelectionSummary.value ? Object.entries(groupSelectionSummary.value.correlation || {}) : [],
+)
+const selectedGroupNumericField = ref('')
+const selectedGroupCategoricalField = ref('')
+const selectedGroupCorrelationField = ref('')
 
 watch(groupOptions, (options) => {
   if (!options.length) {
-    selectedGroupKey.value = ''
+    selectedGroupKeys.value = []
     return
   }
-  if (!options.find((option) => option.key === selectedGroupKey.value)) {
-    selectedGroupKey.value = options[0].key
+  const availableKeys = options.map((option) => option.key)
+  const nextKeys = selectedGroupKeys.value.filter((key) => availableKeys.includes(key))
+  if (!nextKeys.length) {
+    selectedGroupKeys.value = [options[0].key]
+    return
+  }
+  if (nextKeys.length !== selectedGroupKeys.value.length) {
+    selectedGroupKeys.value = nextKeys
+  }
+})
+
+watch(selectedGroupKeys, async () => {
+  if (!selectedGroupRows.value.length) {
+    groupSelectionSummary.value = null
+    return
+  }
+
+  groupSelectionLoading.value = true
+  try {
+    const data = rowsToDatasetMap(selectedGroupRows.value)
+    const response = await gatewayFetch('/analysis/analysis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        data,
+        target: null,
+      }),
+    })
+    groupSelectionSummary.value = response.summary
+  } catch {
+    groupSelectionSummary.value = null
+  } finally {
+    groupSelectionLoading.value = false
+  }
+})
+
+watch(groupNumericEntries, (entries) => {
+  if (!entries.length) {
+    selectedGroupNumericField.value = ''
+    return
+  }
+  if (!entries.find(([key]) => key === selectedGroupNumericField.value)) {
+    selectedGroupNumericField.value = entries[0][0]
+  }
+})
+
+watch(groupCategoricalEntries, (entries) => {
+  if (!entries.length) {
+    selectedGroupCategoricalField.value = ''
+    return
+  }
+  if (!entries.find(([key]) => key === selectedGroupCategoricalField.value)) {
+    selectedGroupCategoricalField.value = entries[0][0]
+  }
+})
+
+watch(groupCorrelationEntries, (entries) => {
+  if (!entries.length) {
+    selectedGroupCorrelationField.value = ''
+    return
+  }
+  if (!entries.find(([key]) => key === selectedGroupCorrelationField.value)) {
+    selectedGroupCorrelationField.value = entries[0][0]
   }
 })
 
@@ -1166,7 +1246,7 @@ function formatGroupKey(bucket, key) {
         <p v-else class="empty-state">{{ t('results.emptyDataset') }}</p>
       </article>
 
-      <article class="panel summary-panel">
+      <article class="panel summary-panel group-summary-panel">
         <div class="panel-head">
           <div>
             <p class="panel-kicker">{{ t('results.analysis') }}</p>
@@ -1278,28 +1358,144 @@ function formatGroupKey(bucket, key) {
             </div>
           </section>
 
-          <section v-if="groupOptions.length" class="metric-group">
-            <h3>{{ t('results.targetGroups') }}</h3>
-            <label class="field">
-              <span>{{ t('results.groupSelect') }}</span>
-              <select v-model="selectedGroupKey">
-                <option v-for="option in groupOptions" :key="option.key" :value="option.key">
-                  {{ option.label }}
-                </option>
-              </select>
-            </label>
+        </div>
+        <p v-else class="empty-state">{{ t('results.analysisEmpty') }}</p>
+      </article>
 
-            <div v-if="selectedGroup" class="metric-grid">
+      <article class="panel summary-panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">{{ t('results.analysis') }}</p>
+            <h2>{{ t('results.targetGroups') }}</h2>
+          </div>
+          <strong class="badge">{{ selectedGroupRowCount }}</strong>
+        </div>
+
+        <div v-if="groupOptions.length" class="summary-stack">
+          <section class="metric-group">
+            <div class="group-checkboxes">
+              <label v-for="option in groupOptions" :key="option.key" class="checkbox-chip">
+                <input v-model="selectedGroupKeys" type="checkbox" :value="option.key" />
+                <span>{{ option.label }}</span>
+              </label>
+            </div>
+
+            <div v-if="selectedGroupKeys.length" class="summary-stack">
               <article class="metric-card">
-                <h4>{{ selectedGroup.label }}</h4>
-                <p>{{ t('results.rowsLabel') }} {{ selectedGroup.details.rows.length }}</p>
-                <p>
-                  {{ t('results.numericFieldsLabel') }}
-                  {{ Object.keys(selectedGroup.details.summary.numeric || {}).length }},
-                  {{ t('results.categoriesLabel') }}
-                  {{ Object.keys(selectedGroup.details.summary.categorical || {}).length }}
-                </p>
+                <h4>{{ selectedGroupLabels || t('results.targetGroups') }}</h4>
+                <p>{{ t('results.rowsLabel') }} {{ selectedGroupRowCount }}</p>
+                <p v-if="groupSelectionLoading" class="helper">{{ t('analysis.analyzing') }}</p>
               </article>
+
+              <template v-if="groupSelectionSummary">
+                <section class="metric-group">
+                  <h3>{{ t('results.numericFields') }}</h3>
+                  <p class="helper">{{ t('results.numericHelp') }}</p>
+                  <label class="field">
+                    <span>{{ t('results.numericSelect') }}</span>
+                    <select v-model="selectedGroupNumericField">
+                      <option v-for="[column] in groupNumericEntries" :key="column" :value="column">
+                        {{ column }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="metric-grid">
+                    <article
+                      v-for="[column, values] in groupNumericEntries.filter(
+                        ([key]) => key === selectedGroupNumericField,
+                      )"
+                      :key="column"
+                      class="metric-card"
+                    >
+                      <h4>{{ column }}</h4>
+                      <p>{{ t('results.mean') }} {{ formatNumber(values.mean) }}</p>
+                      <p class="helper">{{ t('results.meanHelp') }}</p>
+                      <p>{{ t('results.median') }} {{ formatNumber(values.median) }}</p>
+                      <p class="helper">{{ t('results.medianHelp') }}</p>
+                      <p>{{ t('results.std') }} {{ formatNumber(values.std) }}</p>
+                      <p class="helper">{{ t('results.stdHelp') }}</p>
+                      <p>
+                        {{
+                          t('results.range', {
+                            min: formatNumber(values.min),
+                            max: formatNumber(values.max),
+                          })
+                        }}
+                      </p>
+                      <p class="helper">{{ t('results.rangeHelp') }}</p>
+                    </article>
+                  </div>
+                </section>
+
+                <section class="metric-group">
+                  <h3>{{ t('results.categoricalFields') }}</h3>
+                  <p class="helper">{{ t('results.categoricalHelp') }}</p>
+                  <label class="field">
+                    <span>{{ t('results.categoricalSelect') }}</span>
+                    <select v-model="selectedGroupCategoricalField">
+                      <option v-for="[column] in groupCategoricalEntries" :key="column" :value="column">
+                        {{ column }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="metric-grid">
+                    <article
+                      v-for="[column, values] in groupCategoricalEntries.filter(
+                        ([key]) => key === selectedGroupCategoricalField,
+                      )"
+                      :key="column"
+                      class="metric-card"
+                    >
+                      <h4>{{ column }}</h4>
+                      <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
+                      <p>
+                        {{ t('results.top') }}:
+                        {{
+                          values.top_values
+                            .map((item) => `${formatValue(item.value)} (${item.count})`)
+                            .join(', ')
+                        }}
+                      </p>
+                    </article>
+                  </div>
+                </section>
+
+                <section class="metric-group">
+                  <h3>{{ t('results.correlation') }}</h3>
+                  <p class="helper">{{ t('results.correlationHelp') }}</p>
+                  <label class="field">
+                    <span>{{ t('results.correlationSelect') }}</span>
+                    <select v-model="selectedGroupCorrelationField">
+                      <option v-for="[column] in groupCorrelationEntries" :key="column" :value="column">
+                        {{ column }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="table-shell compact">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>{{ t('results.field') }}</th>
+                          <th v-for="[column] in groupCorrelationEntries" :key="column">{{ column }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr
+                          v-for="[rowKey, rowValues] in groupCorrelationEntries.filter(
+                            ([key]) => key === selectedGroupCorrelationField,
+                          )"
+                          :key="rowKey"
+                        >
+                          <th>{{ rowKey }}</th>
+                          <td v-for="[column] in groupCorrelationEntries" :key="column">
+                            {{ formatNumber(rowValues[column]) }}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </template>
             </div>
           </section>
         </div>
