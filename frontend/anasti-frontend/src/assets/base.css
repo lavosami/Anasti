@@ -34,11 +34,7 @@ body {
     radial-gradient(circle at top left, rgba(255, 184, 133, 0.55), transparent 28%),
     radial-gradient(circle at top right, rgba(57, 126, 255, 0.18), transparent 24%),
     linear-gradient(160deg, #fff7ef 0%, #f8fbff 46%, #eef4fb 100%);
-  font-family:
-    "Space Grotesk",
-    "Avenir Next",
-    "Segoe UI",
-    sans-serif;
+  font-family: 'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif;
   line-height: 1.5;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;

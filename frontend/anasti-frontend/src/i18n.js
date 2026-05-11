@@ -100,7 +100,13 @@ const messages = {
       median: 'Median',
       medianHelp: 'Middle value when sorted.',
       std: 'Std',
-      stdHelp: 'How spread out the values are.',
+      stdHelp:
+        'Shows how far values are from each other. If the mean is close to zero, compare it with the range and the domain scale.',
+      stdHelpWithRatio:
+        'Shows how far values are from each other. It is {percent} of the mean: {level}. Guide: under 10% is low, 10–30% is moderate, above 30% is high.',
+      stdLevelLow: 'low spread',
+      stdLevelMedium: 'moderate spread',
+      stdLevelHigh: 'high spread',
       range: 'Range {min} to {max}',
       rangeHelp: 'Smallest and largest values.',
       categoricalFields: 'Categorical fields',
@@ -285,7 +291,13 @@ const messages = {
       median: 'Медиана',
       medianHelp: 'Значение посередине отсортированного списка.',
       std: 'Разброс',
-      stdHelp: 'Показывает, насколько значения далеки друг от друга.',
+      stdHelp:
+        'Показывает, насколько значения далеки друг от друга. Если среднее близко к 0, сравните разброс с диапазоном и смысловым масштабом данных.',
+      stdHelpWithRatio:
+        'Показывает, насколько значения далеки друг от друга. Это {percent} от среднего: {level}. Ориентир: до 10% — слабый, 10–30% — умеренный, выше 30% — сильный.',
+      stdLevelLow: 'слабый разброс',
+      stdLevelMedium: 'умеренный разброс',
+      stdLevelHigh: 'сильный разброс',
       range: 'Диапазон {min} – {max}',
       rangeHelp: 'Минимальное и максимальное значения.',
       categoricalFields: 'Категориальные поля',

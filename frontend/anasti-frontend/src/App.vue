@@ -80,7 +80,6 @@ const selectedCategoricalField = ref('')
 const selectedCorrelationField = ref('')
 const previewRows = computed(() => datasetRows.value.slice(0, 8))
 const previewColumns = computed(() => availableColumns.value)
-const numberLocale = computed(() => (locale.value === 'ru' ? 'ru-RU' : 'en-US'))
 const numericColumns = computed(() =>
   availableColumns.value.filter((column) => {
     const numericValues = datasetRows.value
@@ -122,6 +121,7 @@ const chartPrintImages = reactive({
   pie: '',
   groupHistogram: '',
 })
+const numberPattern = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i
 
 const scatterSeries = computed(() => {
   if (!chartConfig.scatterX || !chartConfig.scatterY) {
@@ -141,6 +141,10 @@ const scatterSeries = computed(() => {
 
   const xInfo = buildAxisInfo(chartConfig.scatterX)
   const yInfo = buildAxisInfo(chartConfig.scatterY)
+  const aggregatedSeries = buildCategoryNumericScatterSeries(xInfo, yInfo)
+  if (aggregatedSeries) {
+    return aggregatedSeries
+  }
   const xCategoryIndex = new Map(xInfo.categories.map((category, index) => [category, index]))
   const yCategoryIndex = new Map(yInfo.categories.map((category, index) => [category, index]))
 
@@ -825,7 +829,7 @@ async function importDataset() {
     }
 
     datasetColumns.value = response
-    datasetRows.value = columnarToRows(response)
+    datasetRows.value = sortRowsByDetectedDate(columnarToRows(response))
     setStatus('import.importedStatus', {
       rows: datasetRows.value.length,
       source: importSourceLabel(activeImporter.value),
@@ -905,14 +909,90 @@ function resolveFileEndpoint(filename) {
 function columnarToRows(payload) {
   const columns = Object.keys(payload || {})
   const rowCount = columns.reduce((max, key) => Math.max(max, payload[key]?.length || 0), 0)
+  const numericColumnSet = new Set(
+    columns.filter((column) => isNumericColumnValues(payload[column] || [])),
+  )
 
   return Array.from({ length: rowCount }, (_, rowIndex) => {
     const row = {}
     for (const column of columns) {
-      row[column] = payload[column]?.[rowIndex] ?? null
+      const value = payload[column]?.[rowIndex] ?? null
+      row[column] = numericColumnSet.has(column) ? normalizeNumericValue(value) : value
     }
     return row
   })
+}
+
+function sortRowsByDetectedDate(rows) {
+  const dateColumn = findDateSortColumn(rows)
+  if (!dateColumn) {
+    return rows
+  }
+
+  return rows
+    .map((row, index) => ({
+      row,
+      index,
+      date: parseSortableDate(row[dateColumn]),
+    }))
+    .sort((a, b) => {
+      const aTime = a.date?.getTime()
+      const bTime = b.date?.getTime()
+      const hasADate = Number.isFinite(aTime)
+      const hasBDate = Number.isFinite(bTime)
+
+      if (hasADate && hasBDate) {
+        return aTime - bTime || a.index - b.index
+      }
+      if (hasADate) {
+        return -1
+      }
+      if (hasBDate) {
+        return 1
+      }
+      return a.index - b.index
+    })
+    .map(({ row }) => row)
+}
+
+function findDateSortColumn(rows) {
+  const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))]
+  let selectedColumn = ''
+  let selectedRatio = 0
+
+  for (const column of columns) {
+    let presentCount = 0
+    let parsedCount = 0
+
+    for (const row of rows) {
+      const value = row[column]
+      if (value === null || value === undefined || value === '') {
+        continue
+      }
+      presentCount += 1
+      if (parseSortableDate(value)) {
+        parsedCount += 1
+      }
+    }
+
+    const ratio = presentCount ? parsedCount / presentCount : 0
+    if (presentCount >= 2 && parsedCount >= 2 && ratio >= 0.6 && ratio > selectedRatio) {
+      selectedColumn = column
+      selectedRatio = ratio
+    }
+  }
+
+  return selectedColumn
+}
+
+function parseSortableDate(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value
+  }
+  if (typeof value !== 'string') {
+    return null
+  }
+  return parseDateString(value)?.date || null
 }
 
 function rowsToDatasetMap(rows) {
@@ -942,7 +1022,57 @@ function formatNumber(value) {
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return value
   }
-  return new Intl.NumberFormat(numberLocale.value, { maximumFractionDigits: 3 }).format(value)
+  return new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: 3,
+    useGrouping: false,
+  }).format(value)
+}
+
+function formatPercent(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return value
+  }
+  return `${value.toFixed(1)}%`
+}
+
+function getCategoryTopPercentage(item, values) {
+  const topValues = values.top_values || []
+  const totalCount =
+    values.total_count || topValues.reduce((sum, topValue) => sum + Number(topValue.count || 0), 0)
+  let percentage = typeof item.percentage === 'number' ? item.percentage : 0
+
+  if (typeof item.percentage !== 'number' && totalCount) {
+    percentage = (Number(item.count || 0) / totalCount) * 100
+  }
+
+  return percentage
+}
+
+function formatCategoryTopStats(item, values) {
+  return `${formatNumber(item.count)} (${formatPercent(getCategoryTopPercentage(item, values))})`
+}
+
+function formatStdHelp(values) {
+  const mean = Math.abs(Number(values.mean))
+  const std = Number(values.std)
+
+  if (!Number.isFinite(mean) || !Number.isFinite(std) || mean === 0) {
+    return t('results.stdHelp')
+  }
+
+  const ratio = (std / mean) * 100
+  let level = t('results.stdLevelHigh')
+
+  if (ratio < 10) {
+    level = t('results.stdLevelLow')
+  } else if (ratio <= 30) {
+    level = t('results.stdLevelMedium')
+  }
+
+  return t('results.stdHelpWithRatio', {
+    percent: formatPercent(ratio),
+    level,
+  })
 }
 
 function asNumber(value) {
@@ -956,11 +1086,49 @@ function asNumber(value) {
     return value ? 1 : 0
   }
   if (typeof value === 'string') {
-    const normalized = value.replace(/\s/g, '').replace(',', '.')
+    const normalized = normalizeNumberText(value)
+    if (!numberPattern.test(normalized)) {
+      return NaN
+    }
     const parsed = Number(normalized)
     return Number.isFinite(parsed) ? parsed : NaN
   }
   return NaN
+}
+
+function normalizeNumberText(value) {
+  const compact = value.trim().replace(/\s/g, '')
+  if (compact.includes(',') && compact.includes('.')) {
+    return compact.lastIndexOf(',') > compact.lastIndexOf('.')
+      ? compact.replace(/\./g, '').replace(/,/g, '.')
+      : compact.replace(/,/g, '')
+  }
+  if (compact.includes(',')) {
+    return compact.replace(',', '.')
+  }
+  return compact
+}
+
+function isNumericColumnValues(values) {
+  const presentValues = values.filter(
+    (value) => value !== null && value !== undefined && value !== '',
+  )
+  if (!presentValues.length) {
+    return false
+  }
+  const numericCount = presentValues.filter(
+    (value) => typeof value !== 'boolean' && Number.isFinite(asNumber(value)),
+  ).length
+
+  return numericCount / presentValues.length >= 0.6
+}
+
+function normalizeNumericValue(value) {
+  if (typeof value === 'boolean') {
+    return value
+  }
+  const numeric = asNumber(value)
+  return Number.isFinite(numeric) ? numeric : value
 }
 
 function buildAxisInfo(column) {
@@ -992,6 +1160,58 @@ function buildAxisInfo(column) {
   }
 
   return { type: 'category', categories }
+}
+
+function buildCategoryNumericScatterSeries(xInfo, yInfo) {
+  const numericOnX = xInfo.type === 'value' && yInfo.type === 'category'
+  const numericOnY = xInfo.type === 'category' && yInfo.type === 'value'
+  if (!numericOnX && !numericOnY) {
+    return null
+  }
+
+  const numericColumn = numericOnX ? chartConfig.scatterX : chartConfig.scatterY
+  const categoryColumn = numericOnX ? chartConfig.scatterY : chartConfig.scatterX
+  const categories = numericOnX ? yInfo.categories : xInfo.categories
+  const categoryIndex = new Map(categories.map((category, index) => [category, index]))
+  const totals = new Map()
+
+  for (const row of datasetRows.value) {
+    const category = formatValue(row[categoryColumn])
+    const numeric = asNumber(row[numericColumn])
+    if (category === '—' || !Number.isFinite(numeric)) {
+      continue
+    }
+    totals.set(category, (totals.get(category) || 0) + numeric)
+  }
+
+  const entries = categories
+    .filter((category) => totals.has(category))
+    .map((category) => [category, totals.get(category)])
+  const points = entries.map(([category, total]) =>
+    numericOnX ? [total, category] : [category, total],
+  )
+  const numericValues = entries.map(([, total]) => total).filter((value) => Number.isFinite(value))
+  const numericMin = numericValues.length ? Math.min(...numericValues) : 0
+  const numericMax = numericValues.length ? Math.max(...numericValues) : 0
+  const trendPoints = entries
+    .map(([category, total]) => {
+      const index = categoryIndex.get(category)
+      return numericOnX ? [total, index] : [index, total]
+    })
+    .filter((point) => Number.isFinite(point[0]) && Number.isFinite(point[1]))
+
+  return {
+    points,
+    xMin: numericOnX ? numericMin : 0,
+    xMax: numericOnX ? numericMax : 0,
+    yMin: numericOnY ? numericMin : 0,
+    yMax: numericOnY ? numericMax : 0,
+    xType: xInfo.type,
+    yType: yInfo.type,
+    xCategories: xInfo.categories,
+    yCategories: yInfo.categories,
+    trend: buildTrendline(trendPoints),
+  }
 }
 
 function buildTrendline(points) {
@@ -1319,31 +1539,126 @@ function formatValue(value) {
   if (typeof value === 'string') {
     const parsed = parseDateString(value)
     if (parsed) {
-      return formatDate(parsed)
+      return formatDate(parsed.date, { includeTime: parsed.hasTime })
     }
   }
   return value
 }
 
 function parseDateString(value) {
-  const hasDateMarkers = /[T:.-]/.test(value)
+  const text = value.trim()
+  if (!text) {
+    return null
+  }
+
+  const dateOnly = parseDateOnlyString(text)
+  if (dateOnly) {
+    return { date: dateOnly, hasTime: false }
+  }
+
+  const localDateTime = parseLocalDateTimeString(text)
+  if (localDateTime) {
+    return { date: localDateTime, hasTime: true }
+  }
+
+  const hasDateMarkers = /[T:./-]/.test(text)
   if (!hasDateMarkers) {
     return null
   }
-  const parsed = new Date(value)
+  const parsed = new Date(text)
   if (Number.isNaN(parsed.getTime())) {
     return null
   }
-  return parsed
+  return { date: parsed, hasTime: hasTimeText(text) }
 }
 
-function formatDate(date) {
+function parseDateOnlyString(value) {
+  const iso = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (iso) {
+    return buildLocalDate(Number(iso[1]), Number(iso[2]), Number(iso[3]))
+  }
+
+  const isoSlash = value.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/)
+  if (isoSlash) {
+    return buildLocalDate(Number(isoSlash[1]), Number(isoSlash[2]), Number(isoSlash[3]))
+  }
+
+  const dotted = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/)
+  if (dotted) {
+    return buildLocalDate(Number(dotted[3]), Number(dotted[2]), Number(dotted[1]))
+  }
+
+  const slash = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  if (slash) {
+    const first = Number(slash[1])
+    const second = Number(slash[2])
+    const day = first > 12 ? first : second > 12 ? second : first
+    const month = first > 12 ? second : second > 12 ? first : second
+    return buildLocalDate(Number(slash[3]), month, day)
+  }
+
+  return null
+}
+
+function parseLocalDateTimeString(value) {
+  const iso = value.match(
+    /^(\d{4})-(\d{1,2})-(\d{1,2})[T\s](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/,
+  )
+  if (iso) {
+    return buildLocalDate(
+      Number(iso[1]),
+      Number(iso[2]),
+      Number(iso[3]),
+      Number(iso[4]),
+      Number(iso[5]),
+      Number(iso[6] || 0),
+    )
+  }
+
+  const dotted = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (dotted) {
+    return buildLocalDate(
+      Number(dotted[3]),
+      Number(dotted[2]),
+      Number(dotted[1]),
+      Number(dotted[4]),
+      Number(dotted[5]),
+      Number(dotted[6] || 0),
+    )
+  }
+
+  return null
+}
+
+function buildLocalDate(year, month, day, hours = 0, minutes = 0, seconds = 0) {
+  const date = new Date(year, month - 1, day, hours, minutes, seconds)
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day ||
+    date.getHours() !== hours ||
+    date.getMinutes() !== minutes ||
+    date.getSeconds() !== seconds
+  ) {
+    return null
+  }
+  return date
+}
+
+function hasTimeText(value) {
+  return /(?:T|\s)\d{1,2}:\d{2}/.test(value)
+}
+
+function formatDate(date, { includeTime = true } = {}) {
   const pad = (num) => String(num).padStart(2, '0')
-  const hours = pad(date.getHours())
-  const minutes = pad(date.getMinutes())
   const day = pad(date.getDate())
   const month = pad(date.getMonth() + 1)
   const year = date.getFullYear()
+  if (!includeTime) {
+    return `${day}.${month}.${year}`
+  }
+  const hours = pad(date.getHours())
+  const minutes = pad(date.getMinutes())
   return `${hours}:${minutes} ${day}.${month}.${year}`
 }
 
@@ -1720,7 +2035,7 @@ function formatGroupKey(bucket, key) {
                   <p>{{ t('results.median') }} {{ formatNumber(values.median) }}</p>
                   <p class="helper">{{ t('results.medianHelp') }}</p>
                   <p>{{ t('results.std') }} {{ formatNumber(values.std) }}</p>
-                  <p class="helper">{{ t('results.stdHelp') }}</p>
+                  <p class="helper">{{ formatStdHelp(values) }}</p>
                   <p>
                     {{
                       t('results.range', {
@@ -1759,14 +2074,23 @@ function formatGroupKey(bucket, key) {
                 >
                   <h4>{{ column }}</h4>
                   <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
-                  <p>
-                    {{ t('results.top') }}:
-                    {{
-                      values.top_values
-                        .map((item) => `${formatValue(item.value)} (${item.count})`)
-                        .join(', ')
-                    }}
-                  </p>
+                  <div class="category-top-block">
+                    <p class="category-top-title">{{ t('results.top') }}</p>
+                    <ol class="category-top-list">
+                      <li
+                        v-for="(item, index) in values.top_values || []"
+                        :key="`${column}-${index}-${formatValue(item.value)}`"
+                        class="category-top-item"
+                      >
+                        <span class="category-top-row">
+                          <span class="category-top-label">{{ formatValue(item.value) }}</span>
+                          <span class="category-top-meta">
+                            {{ formatCategoryTopStats(item, values) }}
+                          </span>
+                        </span>
+                      </li>
+                    </ol>
+                  </div>
                 </article>
               </div>
             </section>
@@ -1921,7 +2245,7 @@ function formatGroupKey(bucket, key) {
                         <p>{{ t('results.median') }} {{ formatNumber(values.median) }}</p>
                         <p class="helper">{{ t('results.medianHelp') }}</p>
                         <p>{{ t('results.std') }} {{ formatNumber(values.std) }}</p>
-                        <p class="helper">{{ t('results.stdHelp') }}</p>
+                        <p class="helper">{{ formatStdHelp(values) }}</p>
                         <p>
                           {{
                             t('results.range', {
@@ -1960,14 +2284,25 @@ function formatGroupKey(bucket, key) {
                       >
                         <h4>{{ column }}</h4>
                         <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
-                        <p>
-                          {{ t('results.top') }}:
-                          {{
-                            values.top_values
-                              .map((item) => `${formatValue(item.value)} (${item.count})`)
-                              .join(', ')
-                          }}
-                        </p>
+                        <div class="category-top-block">
+                          <p class="category-top-title">{{ t('results.top') }}</p>
+                          <ol class="category-top-list">
+                            <li
+                              v-for="(item, index) in values.top_values || []"
+                              :key="`${column}-${index}-${formatValue(item.value)}`"
+                              class="category-top-item"
+                            >
+                              <span class="category-top-row">
+                                <span class="category-top-label">{{
+                                  formatValue(item.value)
+                                }}</span>
+                                <span class="category-top-meta">
+                                  {{ formatCategoryTopStats(item, values) }}
+                                </span>
+                              </span>
+                            </li>
+                          </ol>
+                        </div>
                       </article>
                     </div>
                   </section>
