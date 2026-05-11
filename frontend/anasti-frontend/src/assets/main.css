@@ -151,6 +151,10 @@
   grid-column: span 6;
 }
 
+.target-groups-panel {
+  grid-column: 1 / -1;
+}
+
 .chart-panel {
   grid-column: 1 / -1;
 }
@@ -215,6 +219,14 @@
   min-height: 420px;
 }
 
+.print-chart-image {
+  display: none;
+}
+
+.print-chart-legend {
+  display: none;
+}
+
 .chart-meta {
   display: flex;
   flex-wrap: wrap;
@@ -222,7 +234,6 @@
   font-size: 0.85rem;
   color: var(--ink-muted);
 }
-
 
 .field {
   display: grid;
@@ -274,6 +285,25 @@
   display: grid;
   gap: 0.6rem;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.histogram-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.date-histogram-card {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.histogram-visual {
+  min-height: 320px;
+}
+
+.histogram-canvas {
+  min-height: 320px;
 }
 
 .checkbox-chip {
@@ -346,6 +376,18 @@
 
 .feedback-strip.error {
   background: rgba(217, 78, 35, 0.12);
+}
+
+.report-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.report-toolbar h2 {
+  margin: 0;
 }
 
 .table-shell {
@@ -470,5 +512,149 @@ thead th {
   .sql-grid {
     grid-auto-flow: row;
     grid-template-columns: 1fr;
+  }
+
+  .report-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+
+  body.print-report {
+    background: white;
+    color: #182231;
+  }
+
+  body.print-report .shell > :not(.report-export-area) {
+    display: none !important;
+  }
+
+  body.print-report .report-export-area {
+    width: 100%;
+  }
+
+  body.print-report .shell {
+    width: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  body.print-report .results-grid,
+  body.print-report .charts-grid,
+  body.print-report .chart-grid,
+  body.print-report .metric-grid {
+    display: block;
+    margin-top: 0;
+  }
+
+  body.print-report .panel,
+  body.print-report .chart-card,
+  body.print-report .metric-card {
+    break-inside: avoid;
+    box-shadow: none;
+    background: white;
+    border-color: #d8dee8;
+  }
+
+  body.print-report .panel,
+  body.print-report .chart-card {
+    margin-bottom: 12px;
+  }
+
+  body.print-report .pie-chart-card {
+    break-inside: auto;
+  }
+
+  body.print-report .field,
+  body.print-report .chart-controls,
+  body.print-report .histogram-tabs,
+  body.print-report .histogram-controls,
+  body.print-report .group-checkboxes {
+    display: none !important;
+  }
+
+  body.print-report .table-shell {
+    overflow: visible;
+  }
+
+  body.print-report table {
+    min-width: 0;
+    font-size: 10px;
+  }
+
+  body.print-report thead th {
+    position: static;
+    background: #f8fbff;
+  }
+
+  body.print-report th,
+  body.print-report td {
+    padding: 0.45rem 0.5rem;
+  }
+
+  body.print-report .chart-visual {
+    min-height: 260px;
+    height: 260px;
+    padding: 0.25rem;
+  }
+
+  body.print-report .chart-canvas {
+    min-height: 260px;
+    height: 260px;
+  }
+
+  body.print-report .chart-canvas canvas {
+    max-width: 100% !important;
+  }
+
+  body.print-report .chart-visual.has-print-image {
+    height: auto;
+    min-height: 0;
+  }
+
+  body.print-report .chart-visual.has-print-image .chart-canvas {
+    display: none !important;
+  }
+
+  body.print-report .print-chart-image {
+    display: block;
+    width: 100%;
+    max-height: 320px;
+    object-fit: contain;
+  }
+
+  body.print-report .print-chart-legend {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.4rem 0.75rem;
+    margin-top: 0.75rem;
+    font-size: 10px;
+    color: #26384c;
+  }
+
+  body.print-report .print-chart-legend-item {
+    display: grid;
+    grid-template-columns: 0.55rem minmax(0, 1fr) auto;
+    align-items: center;
+    break-inside: avoid;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+
+  body.print-report .print-chart-legend-swatch {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+  }
+
+  body.print-report .print-chart-legend-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 }

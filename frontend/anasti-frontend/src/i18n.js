@@ -6,7 +6,8 @@ const messages = {
   en: {
     app: {
       eyebrow: 'Anasti Control Surface',
-      headline: 'Import raw data, route it through the gateway, and inspect analysis without storing datasets.',
+      headline:
+        'Import raw data, route it through the gateway, and inspect analysis without storing datasets.',
       heroCopy:
         'Auth goes straight to the auth service. Every collector and analysis request goes through the API gateway with the bearer token.',
       gateway: 'Gateway',
@@ -74,6 +75,16 @@ const messages = {
       requestFailed: 'Request failed.',
       initial: 'Connect auth, import a dataset, then run analysis through the gateway.',
     },
+    report: {
+      kicker: 'Report',
+      title: 'Current report',
+      exportPdf: 'Export PDF',
+      exporting: 'Preparing PDF…',
+      needData: 'Import a dataset before exporting the report.',
+      preparing: 'Preparing the current report view for PDF.',
+      printDialog: 'Print dialog opened. Choose Save as PDF.',
+      exportFinished: 'Report is ready to save as PDF.',
+    },
     results: {
       dataset: 'Dataset',
       preview: 'Preview',
@@ -104,10 +115,16 @@ const messages = {
       targetGroups: 'Target groups',
       groupDefault: 'Groups',
       groupBuckets: {
+        time: 'By time',
         hour: 'By hour',
         weekday: 'By weekday',
+        month_day: 'By day of month',
         month: 'By month',
+        quarter: 'By quarter',
+        year: 'By year',
       },
+      monthDay: 'Day {day}',
+      quarterLabel: 'Q{quarter}',
       weekdays: {
         0: 'Mon',
         1: 'Tue',
@@ -135,6 +152,10 @@ const messages = {
       numericFieldsLabel: 'Numeric fields',
       categoriesLabel: 'categories',
       groupSelect: 'Choose a group',
+      histogramValue: 'Histogram value',
+      histogramCount: 'Row count',
+      histogramTotal: '{field} total: {value}',
+      noDateHistograms: 'No date histograms with more than one bucket.',
       analysisEmpty: 'Analysis results will appear here.',
     },
     charts: {
@@ -146,8 +167,10 @@ const messages = {
       scatterHelp: 'Compare any two fields across the dataset.',
       scatterX: 'X axis field',
       scatterY: 'Y axis field',
+      scatterPoints: 'Data points',
+      trendline: 'Trend line',
       pieTitle: 'Pie chart',
-      pieHelp: 'Share of categories by count or by numeric sum.',
+      pieHelp: 'Share of categories',
       pieCategory: 'Category field',
       pieMode: 'Mode',
       pieCount: 'Count records',
@@ -157,6 +180,7 @@ const messages = {
       noCategory: 'Pick a category field with values.',
       rangeX: 'X range {min} – {max}',
       rangeY: 'Y range {min} – {max}',
+      trendEquation: 'Trend {equation}',
     },
     language: {
       label: 'Language',
@@ -167,7 +191,8 @@ const messages = {
   ru: {
     app: {
       eyebrow: 'Anasti Control Surface',
-      headline: 'Импортируйте сырые данные, пропустите их через шлюз и изучите анализ без хранения датасетов.',
+      headline:
+        'Импортируйте сырые данные, пропустите их через шлюз и изучите анализ без хранения датасетов.',
       heroCopy:
         'Авторизация идет напрямую в auth сервис. Все запросы на сбор и анализ проходят через API gateway с bearer токеном.',
       gateway: 'Gateway',
@@ -235,6 +260,16 @@ const messages = {
       requestFailed: 'Запрос не выполнен.',
       initial: 'Подключите auth, импортируйте датасет и запустите анализ через шлюз.',
     },
+    report: {
+      kicker: 'Отчет',
+      title: 'Текущий отчет',
+      exportPdf: 'Выгрузить PDF',
+      exporting: 'Подготовка PDF…',
+      needData: 'Сначала импортируйте датасет для выгрузки отчета.',
+      preparing: 'Готовим текущий вид отчета для PDF.',
+      printDialog: 'Открыт диалог печати. Выберите сохранение в PDF.',
+      exportFinished: 'Отчет готов к сохранению в PDF.',
+    },
     results: {
       dataset: 'Датасет',
       preview: 'Предпросмотр',
@@ -265,10 +300,16 @@ const messages = {
       targetGroups: 'Целевые группы',
       groupDefault: 'Группы',
       groupBuckets: {
+        time: 'По времени',
         hour: 'По часам',
         weekday: 'По дням недели',
+        month_day: 'По дням месяца',
         month: 'По месяцам',
+        quarter: 'По кварталам',
+        year: 'По годам',
       },
+      monthDay: 'День {day}',
+      quarterLabel: '{quarter} квартал',
       weekdays: {
         0: 'Пн',
         1: 'Вт',
@@ -296,6 +337,10 @@ const messages = {
       numericFieldsLabel: 'Числовые поля',
       categoriesLabel: 'категории',
       groupSelect: 'Выберите группу',
+      histogramValue: 'Значение гистограммы',
+      histogramCount: 'Количество строк',
+      histogramTotal: 'Сумма {field}: {value}',
+      noDateHistograms: 'Для выбранной даты нет гистограмм с несколькими значениями.',
       analysisEmpty: 'Результаты анализа появятся здесь.',
     },
     charts: {
@@ -307,8 +352,10 @@ const messages = {
       scatterHelp: 'Сравнение любых двух полей.',
       scatterX: 'Поле по оси X',
       scatterY: 'Поле по оси Y',
+      scatterPoints: 'Точки данных',
+      trendline: 'Линия тренда',
       pieTitle: 'Круговая диаграмма',
-      pieHelp: 'Доли категорий по количеству или по сумме.',
+      pieHelp: 'Доли категорий',
       pieCategory: 'Категориальное поле',
       pieMode: 'Режим',
       pieCount: 'Количество записей',
@@ -318,6 +365,7 @@ const messages = {
       noCategory: 'Выберите поле с категориями.',
       rangeX: 'Диапазон X {min} – {max}',
       rangeY: 'Диапазон Y {min} – {max}',
+      trendEquation: 'Тренд {equation}',
     },
     language: {
       label: 'Язык',

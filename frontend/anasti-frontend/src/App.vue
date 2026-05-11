@@ -6,14 +6,18 @@ import { useI18n } from './i18n'
 const { locale, setLocale, t, availableLocales } = useI18n()
 
 const authBaseUrl = (import.meta.env.VITE_AUTH_URL || 'http://localhost:8001').replace(/\/$/, '')
-const gatewayBaseUrl = (import.meta.env.VITE_GATEWAY_URL || 'http://localhost:8000').replace(/\/$/, '')
+const gatewayBaseUrl = (import.meta.env.VITE_GATEWAY_URL || 'http://localhost:8000').replace(
+  /\/$/,
+  '',
+)
 const tokenStorageKey = 'anasti-auth'
 
 const authMode = ref('login')
-const activeImporter = ref('jsonText')
+const activeImporter = ref('file')
 const loading = ref(false)
 const importLoading = ref(false)
 const analysisLoading = ref(false)
+const pdfExporting = ref(false)
 const statusMessage = ref(t('feedback.initial'))
 const errorMessage = ref('')
 
@@ -48,10 +52,13 @@ const datasetColumns = ref({})
 const datasetRows = ref([])
 const analysisResult = ref(null)
 const targetField = ref('')
+const reportRef = ref(null)
+let printFallbackTimer = null
 
 const authState = reactive(loadStoredAuth())
 
 const isAuthenticated = computed(() => Boolean(authState.accessToken))
+const hasReportContent = computed(() => Boolean(datasetRows.value.length || analysisResult.value))
 const availableColumns = computed(() => {
   const rows = datasetRows.value
   if (!rows.length) {
@@ -83,7 +90,16 @@ const numericColumns = computed(() =>
   }),
 )
 
-const chartPalette = ['#ff6b3d', '#1c7ed6', '#f59f00', '#20c997', '#e64980', '#5c7cfa', '#fab005', '#12b886']
+const chartPalette = [
+  '#ff6b3d',
+  '#1c7ed6',
+  '#f59f00',
+  '#20c997',
+  '#e64980',
+  '#5c7cfa',
+  '#fab005',
+  '#12b886',
+]
 const chartConfig = reactive({
   scatterX: '',
   scatterY: '',
@@ -94,10 +110,17 @@ const chartConfig = reactive({
 const chartRefs = {
   scatter: ref(null),
   pie: ref(null),
+  groupHistogram: ref(null),
 }
 const chartInstances = reactive({
   scatter: null,
   pie: null,
+  groupHistogram: null,
+})
+const chartPrintImages = reactive({
+  scatter: '',
+  pie: '',
+  groupHistogram: '',
 })
 
 const scatterSeries = computed(() => {
@@ -118,9 +141,11 @@ const scatterSeries = computed(() => {
 
   const xInfo = buildAxisInfo(chartConfig.scatterX)
   const yInfo = buildAxisInfo(chartConfig.scatterY)
+  const xCategoryIndex = new Map(xInfo.categories.map((category, index) => [category, index]))
+  const yCategoryIndex = new Map(yInfo.categories.map((category, index) => [category, index]))
 
   const points = []
-  const numericPoints = []
+  const trendPoints = []
 
   for (const row of datasetRows.value) {
     const xRaw = row[chartConfig.scatterX]
@@ -142,8 +167,12 @@ const scatterSeries = computed(() => {
     }
 
     points.push([xVal, yVal])
-    if (xInfo.type === 'value' && yInfo.type === 'value') {
-      numericPoints.push([xVal, yVal])
+    if (xInfo.type === 'value' || yInfo.type === 'value') {
+      const trendX = xInfo.type === 'value' ? xVal : xCategoryIndex.get(xVal)
+      const trendY = yInfo.type === 'value' ? yVal : yCategoryIndex.get(yVal)
+      if (Number.isFinite(trendX) && Number.isFinite(trendY)) {
+        trendPoints.push([trendX, trendY])
+      }
     }
   }
 
@@ -162,12 +191,21 @@ const scatterSeries = computed(() => {
     }
   }
 
-  const xMin = xInfo.type === 'value' ? Math.min(...numericPoints.map((point) => point[0])) : 0
-  const xMax = xInfo.type === 'value' ? Math.max(...numericPoints.map((point) => point[0])) : 0
-  const yMin = yInfo.type === 'value' ? Math.min(...numericPoints.map((point) => point[1])) : 0
-  const yMax = yInfo.type === 'value' ? Math.max(...numericPoints.map((point) => point[1])) : 0
+  const xValues =
+    xInfo.type === 'value'
+      ? points.map((point) => point[0]).filter((value) => Number.isFinite(value))
+      : []
+  const yValues =
+    yInfo.type === 'value'
+      ? points.map((point) => point[1]).filter((value) => Number.isFinite(value))
+      : []
+  const xMin = xValues.length ? Math.min(...xValues) : 0
+  const xMax = xValues.length ? Math.max(...xValues) : 0
+  const yMin = yValues.length ? Math.min(...yValues) : 0
+  const yMax = yValues.length ? Math.max(...yValues) : 0
 
-  const trend = xInfo.type === 'value' && yInfo.type === 'value' ? buildTrendline(numericPoints) : null
+  const trend =
+    xInfo.type === 'value' || yInfo.type === 'value' ? buildTrendline(trendPoints) : null
 
   return {
     points,
@@ -249,14 +287,29 @@ watch(availableColumns, (columns) => {
     chartConfig.pieCategory = columns[0] || ''
   }
 
-  if (!columns.includes(chartConfig.scatterX)) {
-    chartConfig.scatterX = columns[0] || ''
-  }
-  if (!columns.includes(chartConfig.scatterY)) {
-    chartConfig.scatterY = columns[1] || columns[0] || ''
-  }
-  if (chartConfig.scatterX === chartConfig.scatterY && columns.length > 1) {
-    chartConfig.scatterY = columns.find((column) => column !== chartConfig.scatterX) || columns[0]
+  const scatterDefaults = numericColumns.value.length > 1 ? numericColumns.value : columns
+  const hasNumericScatterPair =
+    numericColumns.value.includes(chartConfig.scatterX) &&
+    numericColumns.value.includes(chartConfig.scatterY) &&
+    chartConfig.scatterX !== chartConfig.scatterY
+
+  if (numericColumns.value.length > 1 && !hasNumericScatterPair) {
+    chartConfig.scatterX = numericColumns.value[0]
+    chartConfig.scatterY = numericColumns.value[1]
+  } else {
+    if (!columns.includes(chartConfig.scatterX)) {
+      chartConfig.scatterX = scatterDefaults[0] || ''
+    }
+    if (!columns.includes(chartConfig.scatterY)) {
+      chartConfig.scatterY =
+        scatterDefaults.find((column) => column !== chartConfig.scatterX) || columns[0] || ''
+    }
+    if (chartConfig.scatterX === chartConfig.scatterY && columns.length > 1) {
+      chartConfig.scatterY =
+        scatterDefaults.find((column) => column !== chartConfig.scatterX) ||
+        columns.find((column) => column !== chartConfig.scatterX) ||
+        columns[0]
+    }
   }
 })
 
@@ -304,9 +357,59 @@ watch(numericColumns, (columns) => {
   }
 })
 
+const dateHistogramBucketOrder = ['time', 'weekday', 'month_day', 'month', 'quarter', 'year']
+const dateHistogramCountKey = '__count__'
+const selectedDateHistogramBucket = ref('')
+const selectedDateHistogramValue = ref(dateHistogramCountKey)
+const dateHistogramValueOptions = computed(() => [
+  { key: dateHistogramCountKey, label: t('results.histogramCount') },
+  ...numericColumns.value.map((column) => ({ key: column, label: column })),
+])
+const selectedDateHistogramValueLabel = computed(
+  () =>
+    dateHistogramValueOptions.value.find(
+      (option) => option.key === selectedDateHistogramValue.value,
+    )?.label || t('results.histogramCount'),
+)
+const hasDateGroupResult = computed(() => isDateGroupMap(analysisResult.value?.groups))
+const dateGroupBuckets = computed(() => {
+  const groups = analysisResult.value?.groups
+  if (!isDateGroupMap(groups)) {
+    return []
+  }
+
+  return dateHistogramBucketOrder
+    .map((bucket) => {
+      const bucketGroups = groups[bucket] || {}
+      const bars = Object.entries(bucketGroups)
+        .map(([key, details]) => ({
+          key,
+          label: formatGroupKey(bucket, key),
+          value: buildDateHistogramValue(details),
+        }))
+        .filter((bar) => Number.isFinite(bar.value))
+        .sort((a, b) => dateGroupSortValue(bucket, a.key) - dateGroupSortValue(bucket, b.key))
+
+      return {
+        key: bucket,
+        label: t(`results.groupBuckets.${bucket}`),
+        bars,
+        total: bars.reduce((sum, bar) => sum + bar.value, 0),
+        valueLabel: selectedDateHistogramValueLabel.value,
+        isCount: selectedDateHistogramValue.value === dateHistogramCountKey,
+      }
+    })
+    .filter((bucket) => bucket.bars.length > 1)
+})
+const selectedDateHistogram = computed(
+  () =>
+    dateGroupBuckets.value.find((bucket) => bucket.key === selectedDateHistogramBucket.value) ||
+    null,
+)
+
 const groupOptions = computed(() => {
   const groups = analysisResult.value?.groups
-  if (!groups) {
+  if (!groups || isDateGroupMap(groups)) {
     return []
   }
   const values = Object.values(groups)
@@ -332,12 +435,21 @@ const groupOptions = computed(() => {
   })
 })
 const selectedGroupKeys = ref([])
-const selectedGroups = computed(() => groupOptions.value.filter((option) => selectedGroupKeys.value.includes(option.key)))
-const selectedGroupLabels = computed(() => selectedGroups.value.map((group) => group.label).join(', '))
+const selectedGroups = computed(() =>
+  groupOptions.value.filter((option) => selectedGroupKeys.value.includes(option.key)),
+)
+const selectedGroupLabels = computed(() =>
+  selectedGroups.value.map((group) => group.label).join(', '),
+)
 const selectedGroupRows = computed(() =>
   selectedGroups.value.flatMap((group) => group.details?.rows || []),
 )
 const selectedGroupRowCount = computed(() => selectedGroupRows.value.length)
+const groupPanelBadgeCount = computed(() =>
+  selectedDateHistogram.value
+    ? formatNumber(selectedDateHistogram.value.total)
+    : selectedGroupRowCount.value,
+)
 const groupSelectionSummary = ref(null)
 const groupSelectionLoading = ref(false)
 const groupNumericEntries = computed(() =>
@@ -352,6 +464,25 @@ const groupCorrelationEntries = computed(() =>
 const selectedGroupNumericField = ref('')
 const selectedGroupCategoricalField = ref('')
 const selectedGroupCorrelationField = ref('')
+
+watch(dateHistogramValueOptions, (options) => {
+  if (!options.find((option) => option.key === selectedDateHistogramValue.value)) {
+    selectedDateHistogramValue.value = dateHistogramCountKey
+  }
+})
+
+watch(dateGroupBuckets, (buckets) => {
+  if (!buckets.length) {
+    selectedDateHistogramBucket.value = ''
+    nextTick(renderGroupHistogramChart)
+    return
+  }
+  if (!buckets.find((bucket) => bucket.key === selectedDateHistogramBucket.value)) {
+    selectedDateHistogramBucket.value = buckets[0].key
+    return
+  }
+  nextTick(renderGroupHistogramChart)
+})
 
 watch(groupOptions, (options) => {
   if (!options.length) {
@@ -432,22 +563,118 @@ const handleResize = () => {
   })
 }
 
+function clearChartPrintImages() {
+  Object.keys(chartPrintImages).forEach((name) => {
+    chartPrintImages[name] = ''
+  })
+}
+
+function captureChartImage(instance) {
+  return instance.getDataURL({
+    type: 'png',
+    pixelRatio: 2,
+    backgroundColor: '#ffffff',
+  })
+}
+
+function capturePieChartPrintImage(instance) {
+  try {
+    instance.setOption(buildPieChartOption({ print: true }), true)
+    return captureChartImage(instance)
+  } finally {
+    renderPieChart()
+  }
+}
+
+function captureChartPrintImages() {
+  clearChartPrintImages()
+
+  Object.entries(chartInstances).forEach(([name, instance]) => {
+    if (!instance) {
+      return
+    }
+
+    try {
+      chartPrintImages[name] =
+        name === 'pie' ? capturePieChartPrintImage(instance) : captureChartImage(instance)
+    } catch {
+      chartPrintImages[name] = ''
+    }
+  })
+}
+
+function finishPdfExport() {
+  if (printFallbackTimer) {
+    window.clearTimeout(printFallbackTimer)
+    printFallbackTimer = null
+  }
+
+  document.body.classList.remove('print-report')
+  clearChartPrintImages()
+  pdfExporting.value = false
+  setStatus('report.exportFinished')
+  nextTick(handleResize)
+}
+
+function waitForPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve)
+    })
+  })
+}
+
+async function exportReportToPdf() {
+  resetMessages()
+
+  if (!hasReportContent.value || !reportRef.value) {
+    setError('report.needData')
+    return
+  }
+
+  pdfExporting.value = true
+  setStatus('report.preparing')
+
+  await nextTick()
+  handleResize()
+  await waitForPaint()
+  captureChartPrintImages()
+  document.body.classList.add('print-report')
+  await nextTick()
+  await waitForPaint()
+
+  setStatus('report.printDialog')
+  printFallbackTimer = window.setTimeout(finishPdfExport, 60000)
+  window.print()
+}
+
 onMounted(() => {
   nextTick(() => {
     renderScatterChart()
     renderPieChart()
+    renderGroupHistogramChart()
   })
   window.addEventListener('resize', handleResize)
+  window.addEventListener('beforeprint', handleResize)
+  window.addEventListener('afterprint', finishPdfExport)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
+  window.removeEventListener('beforeprint', handleResize)
+  window.removeEventListener('afterprint', finishPdfExport)
+  if (printFallbackTimer) {
+    window.clearTimeout(printFallbackTimer)
+  }
+  document.body.classList.remove('print-report')
   destroyChart('scatter')
   destroyChart('pie')
+  destroyChart('groupHistogram')
 })
 
 watch(scatterSeries, () => nextTick(renderScatterChart), { deep: true })
 watch(pieData, () => nextTick(renderPieChart), { deep: true })
+watch(selectedDateHistogram, () => nextTick(renderGroupHistogramChart), { deep: true })
 watch(
   () => [chartConfig.scatterX, chartConfig.scatterY],
   () => nextTick(renderScatterChart),
@@ -464,6 +691,7 @@ watch(locale, () => {
   nextTick(() => {
     renderScatterChart()
     renderPieChart()
+    renderGroupHistogramChart()
   })
 })
 
@@ -707,9 +935,6 @@ function importSourceLabel(source) {
   if (source === 'jsonText') {
     return t('import.sourceJson')
   }
-  if (source === 'sql') {
-    return t('import.sourceSql')
-  }
   return t('import.sourceFile')
 }
 
@@ -739,12 +964,16 @@ function asNumber(value) {
 }
 
 function buildAxisInfo(column) {
-  const values = datasetRows.value.map((row) => row[column]).filter((value) => value !== null && value !== undefined)
+  const values = datasetRows.value
+    .map((row) => row[column])
+    .filter((value) => value !== null && value !== undefined)
   if (!values.length) {
     return { type: 'value', categories: [] }
   }
 
-  const numericValues = values.map((value) => asNumber(value)).filter((value) => Number.isFinite(value))
+  const numericValues = values
+    .map((value) => asNumber(value))
+    .filter((value) => Number.isFinite(value))
   const nonNumericCount = values.filter((value) => !Number.isFinite(asNumber(value))).length
 
   if (numericValues.length && nonNumericCount === 0) {
@@ -795,10 +1024,19 @@ function buildTrendline(points) {
   const xMin = Math.min(...finite.map((point) => point[0]))
   const xMax = Math.max(...finite.map((point) => point[0]))
 
-  return [
-    [xMin, slope * xMin + intercept],
-    [xMax, slope * xMax + intercept],
-  ]
+  return {
+    points: [
+      [xMin, slope * xMin + intercept],
+      [xMax, slope * xMax + intercept],
+    ],
+    slope,
+    intercept,
+  }
+}
+
+function formatTrendEquation(trend) {
+  const sign = trend.intercept < 0 ? '-' : '+'
+  return `y = ${formatNumber(trend.slope)}x ${sign} ${formatNumber(Math.abs(trend.intercept))}`
 }
 
 function truncateLabel(value, max = 15) {
@@ -870,10 +1108,18 @@ function renderScatterChart() {
   instance.setOption(
     {
       tooltip: { trigger: 'item' },
+      legend: scatterSeries.value.trend
+        ? {
+            top: 0,
+            right: 8,
+            data: [t('charts.scatterPoints'), t('charts.trendline')],
+            textStyle: { color: '#536171' },
+          }
+        : undefined,
       grid: {
         left: isYCategory ? 120 : 48,
         right: 24,
-        top: 24,
+        top: scatterSeries.value.trend ? 52 : 24,
         bottom: isXCategory ? 110 : 36,
       },
       xAxis: {
@@ -881,7 +1127,8 @@ function renderScatterChart() {
         name: chartConfig.scatterX,
         nameGap: 22,
         nameLocation: 'middle',
-        data: scatterSeries.value.xType === 'category' ? scatterSeries.value.xCategories : undefined,
+        data:
+          scatterSeries.value.xType === 'category' ? scatterSeries.value.xCategories : undefined,
         axisLabel: axisLabelOptions(isXCategory),
       },
       yAxis: {
@@ -889,11 +1136,13 @@ function renderScatterChart() {
         name: chartConfig.scatterY,
         nameGap: 30,
         nameLocation: 'middle',
-        data: scatterSeries.value.yType === 'category' ? scatterSeries.value.yCategories : undefined,
+        data:
+          scatterSeries.value.yType === 'category' ? scatterSeries.value.yCategories : undefined,
         axisLabel: axisLabelOptions(isYCategory),
       },
       series: [
         {
+          name: t('charts.scatterPoints'),
           type: 'scatter',
           data: scatterSeries.value.points,
           symbolSize: 8,
@@ -902,10 +1151,12 @@ function renderScatterChart() {
         ...(scatterSeries.value.trend
           ? [
               {
+                name: t('charts.trendline'),
                 type: 'line',
-                data: scatterSeries.value.trend,
+                data: scatterSeries.value.trend.points,
                 showSymbol: false,
-                lineStyle: { width: 2, type: 'dashed', color: '#ff6b3d' },
+                lineStyle: { width: 3, type: 'dashed', color: '#ff6b3d' },
+                z: 3,
               },
             ]
           : []),
@@ -926,25 +1177,136 @@ function renderPieChart() {
     return
   }
 
+  instance.setOption(buildPieChartOption(), true)
+}
+
+function buildPieChartOption({ print = false } = {}) {
+  const slices = pieData.value.slices
+  const legendValues = new Map(slices.map((slice) => [slice.label, slice.value]))
+
+  return {
+    animation: !print,
+    tooltip: { trigger: 'item' },
+    legend: print
+      ? { show: false }
+      : {
+          type: 'scroll',
+          bottom: 8,
+          left: 8,
+          right: 8,
+          data: slices.map((slice) => slice.label),
+          textStyle: {
+            color: '#536171',
+            fontSize: 12,
+          },
+          formatter: (name) => {
+            const value = legendValues.get(name)
+            return value === undefined ? name : `${truncateLabel(name, 18)}: ${formatNumber(value)}`
+          },
+        },
+    series: [
+      {
+        type: 'pie',
+        radius: print ? ['34%', '74%'] : ['30%', '70%'],
+        center: print ? ['50%', '50%'] : ['50%', '42%'],
+        label: { show: false },
+        labelLine: { show: false },
+        data: slices.map((slice) => ({
+          name: slice.label,
+          value: slice.value,
+          itemStyle: { color: slice.color },
+        })),
+      },
+    ],
+  }
+}
+
+function renderGroupHistogramChart() {
+  const histogram = selectedDateHistogram.value
+  if (!histogram?.bars.length) {
+    destroyChart('groupHistogram')
+    return
+  }
+
+  const instance = initChart('groupHistogram')
+  if (!instance) {
+    return
+  }
+
   instance.setOption(
     {
-      tooltip: { trigger: 'item' },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        valueFormatter: (value) => formatNumber(value),
+      },
+      grid: {
+        left: 48,
+        right: 18,
+        top: 24,
+        bottom: histogram.bars.length > 8 ? 92 : 44,
+      },
+      xAxis: {
+        type: 'category',
+        data: histogram.bars.map((bar) => bar.label),
+        axisLabel: {
+          interval: 0,
+          rotate: histogram.bars.length > 8 ? 45 : 0,
+          hideOverlap: true,
+          width: 96,
+          overflow: 'truncate',
+          formatter: (value) => truncateLabel(value, 12),
+        },
+      },
+      yAxis: {
+        type: 'value',
+        minInterval: histogram.isCount ? 1 : undefined,
+        name: histogram.valueLabel,
+        nameGap: 30,
+        nameLocation: 'middle',
+      },
       series: [
         {
-          type: 'pie',
-          radius: ['30%', '70%'],
-          label: { show: false },
-          labelLine: { show: false },
-          data: pieData.value.slices.map((slice) => ({
-            name: slice.label,
-            value: slice.value,
-            itemStyle: { color: slice.color },
+          name: histogram.valueLabel,
+          type: 'bar',
+          data: histogram.bars.map((bar, index) => ({
+            value: bar.value,
+            itemStyle: { color: chartPalette[index % chartPalette.length] },
           })),
+          barMaxWidth: 52,
+          label: {
+            show: true,
+            position: 'top',
+            color: '#36506d',
+            formatter: (params) => formatNumber(params.value),
+          },
         },
       ],
     },
     true,
   )
+}
+
+function buildDateHistogramValue(details) {
+  if (selectedDateHistogramValue.value === dateHistogramCountKey) {
+    return details?.summary?.row_count || details?.rows?.length || 0
+  }
+
+  return (details?.rows || []).reduce((sum, row) => {
+    const value = asNumber(row[selectedDateHistogramValue.value])
+    return Number.isFinite(value) ? sum + value : sum
+  }, 0)
+}
+
+function formatDateHistogramTotal(histogram) {
+  const value = formatNumber(histogram.total)
+  if (histogram.isCount) {
+    return t('results.rows', { count: value })
+  }
+  return t('results.histogramTotal', {
+    field: histogram.valueLabel,
+    value,
+  })
 }
 
 function formatValue(value) {
@@ -964,7 +1326,7 @@ function formatValue(value) {
 }
 
 function parseDateString(value) {
-  const hasDateMarkers = /[T:\-\.]/.test(value)
+  const hasDateMarkers = /[T:.-]/.test(value)
   if (!hasDateMarkers) {
     return null
   }
@@ -985,15 +1347,56 @@ function formatDate(date) {
   return `${hours}:${minutes} ${day}.${month}.${year}`
 }
 
+function isDateGroupMap(groups) {
+  if (!groups || Array.isArray(groups) || typeof groups !== 'object') {
+    return false
+  }
+  const dateBuckets = new Set(dateHistogramBucketOrder)
+  const entries = Object.entries(groups)
+  return (
+    entries.length > 0 &&
+    entries.every(
+      ([bucket, bucketGroups]) =>
+        dateBuckets.has(bucket) &&
+        bucketGroups &&
+        typeof bucketGroups === 'object' &&
+        !Array.isArray(bucketGroups) &&
+        !Object.prototype.hasOwnProperty.call(bucketGroups, 'rows'),
+    )
+  )
+}
+
+function dateGroupSortValue(bucket, key) {
+  if (bucket === 'time') {
+    const [hours, minutes = '0'] = String(key).split(':')
+    const parsed = Number.parseInt(hours, 10) * 60 + Number.parseInt(minutes, 10)
+    return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER
+  }
+  if (['weekday', 'month_day', 'month', 'quarter', 'year'].includes(bucket)) {
+    const parsed = Number.parseInt(key, 10)
+    return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER
+  }
+  return String(key).localeCompare(String(key))
+}
+
 function formatGroupKey(bucket, key) {
+  if (bucket === 'time') {
+    return key
+  }
   if (bucket === 'hour') {
     return `${key}:00`
   }
   if (bucket === 'weekday') {
     return t(`results.weekdays.${key}`)
   }
+  if (bucket === 'month_day') {
+    return t('results.monthDay', { day: key })
+  }
   if (bucket === 'month') {
     return t(`results.months.${key}`)
+  }
+  if (bucket === 'quarter') {
+    return t('results.quarterLabel', { quarter: key })
   }
   return key
 }
@@ -1014,11 +1417,11 @@ function formatGroupKey(bucket, key) {
         </label>
       </div>
       <h1>{{ t('app.headline') }}</h1>
-      <p class="hero-copy">
+      <!-- <p class="hero-copy">
         {{ t('app.heroCopy') }}
-      </p>
+      </p> -->
 
-      <div class="hero-grid">
+      <!-- <div class="hero-grid">
         <article class="stat-card">
           <span class="stat-label">{{ t('app.gateway') }}</span>
           <strong>{{ gatewayBaseUrl }}</strong>
@@ -1031,7 +1434,7 @@ function formatGroupKey(bucket, key) {
           <span class="stat-label">{{ t('app.session') }}</span>
           <strong>{{ isAuthenticated ? authState.email || t('app.authenticated') : t('app.anonymous') }}</strong>
         </article>
-      </div>
+      </div> -->
     </section>
 
     <section class="workspace-grid">
@@ -1046,7 +1449,12 @@ function formatGroupKey(bucket, key) {
         <form class="stack" @submit.prevent="submitAuth">
           <label class="field">
             <span>{{ t('auth.email') }}</span>
-            <input v-model="authForm.email" autocomplete="email" :placeholder="t('auth.emailPlaceholder')" type="email" />
+            <input
+              v-model="authForm.email"
+              autocomplete="email"
+              :placeholder="t('auth.emailPlaceholder')"
+              type="email"
+            />
           </label>
           <label class="field">
             <span>{{ t('auth.password') }}</span>
@@ -1060,7 +1468,13 @@ function formatGroupKey(bucket, key) {
 
           <div class="action-row">
             <button class="primary-button" :disabled="loading" type="submit">
-              {{ loading ? t('auth.sending') : authMode === 'login' ? t('auth.enterWorkspace') : t('auth.createAccount') }}
+              {{
+                loading
+                  ? t('auth.sending')
+                  : authMode === 'login'
+                    ? t('auth.enterWorkspace')
+                    : t('auth.createAccount')
+              }}
             </button>
             <button class="ghost-button" :disabled="!isAuthenticated" type="button" @click="logout">
               {{ t('auth.clearToken') }}
@@ -1111,14 +1525,14 @@ function formatGroupKey(bucket, key) {
             >
               {{ t('import.file') }}
             </button>
-            <button
+            <!-- <button
               class="chip"
               :class="{ active: activeImporter === 'sql' }"
               type="button"
               @click="activeImporter = 'sql'"
             >
               {{ t('import.sql') }}
-            </button>
+            </button> -->
           </div>
         </div>
 
@@ -1176,7 +1590,12 @@ function formatGroupKey(bucket, key) {
         </div>
 
         <div class="action-row">
-          <button class="primary-button" :disabled="importLoading || !isAuthenticated" type="button" @click="importDataset">
+          <button
+            class="primary-button"
+            :disabled="importLoading || !isAuthenticated"
+            type="button"
+            @click="importDataset"
+          >
             {{ importLoading ? t('import.importing') : t('import.importButton') }}
           </button>
         </div>
@@ -1219,383 +1638,535 @@ function formatGroupKey(bucket, key) {
       <p>{{ errorMessage || statusMessage }}</p>
     </section>
 
-    <section class="results-grid">
-      <article class="panel preview-panel">
-        <div class="panel-head">
-          <div>
-            <p class="panel-kicker">{{ t('results.dataset') }}</p>
-            <h2>{{ t('results.preview') }}</h2>
-          </div>
-          <strong class="badge">{{ t('results.rows', { count: datasetRows.length }) }}</strong>
-        </div>
-
-        <div v-if="previewRows.length" class="table-shell">
-          <table>
-            <thead>
-              <tr>
-                <th v-for="column in previewColumns" :key="column">{{ column }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, index) in previewRows" :key="index">
-                <td v-for="column in previewColumns" :key="column">{{ formatValue(row[column]) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p v-else class="empty-state">{{ t('results.emptyDataset') }}</p>
-      </article>
-
-      <article class="panel summary-panel group-summary-panel">
-        <div class="panel-head">
-          <div>
-            <p class="panel-kicker">{{ t('results.analysis') }}</p>
-            <h2>{{ t('results.summary') }}</h2>
-          </div>
-          <strong class="badge">{{ t('results.analyzed', { count: analysisResult?.summary?.row_count || 0 }) }}</strong>
-        </div>
-
-        <div v-if="analysisResult" class="summary-stack">
-          <section class="metric-group">
-            <h3>{{ t('results.numericFields') }}</h3>
-            <p class="helper">{{ t('results.numericHelp') }}</p>
-            <label class="field">
-              <span>{{ t('results.numericSelect') }}</span>
-              <select v-model="selectedNumericField">
-                <option v-for="[column] in numericSummaryEntries" :key="column" :value="column">
-                  {{ column }}
-                </option>
-              </select>
-            </label>
-            <div class="metric-grid">
-              <article
-                v-for="[column, values] in numericSummaryEntries.filter(([key]) => key === selectedNumericField)"
-                :key="column"
-                class="metric-card"
-              >
-                <h4>{{ column }}</h4>
-                <p>{{ t('results.mean') }} {{ formatNumber(values.mean) }}</p>
-                <p class="helper">{{ t('results.meanHelp') }}</p>
-                <p>{{ t('results.median') }} {{ formatNumber(values.median) }}</p>
-                <p class="helper">{{ t('results.medianHelp') }}</p>
-                <p>{{ t('results.std') }} {{ formatNumber(values.std) }}</p>
-                <p class="helper">{{ t('results.stdHelp') }}</p>
-                <p>
-                  {{
-                    t('results.range', {
-                      min: formatNumber(values.min),
-                      max: formatNumber(values.max),
-                    })
-                  }}
-                </p>
-                <p class="helper">{{ t('results.rangeHelp') }}</p>
-              </article>
-            </div>
-          </section>
-
-          <section class="metric-group">
-            <h3>{{ t('results.categoricalFields') }}</h3>
-            <p class="helper">{{ t('results.categoricalHelp') }}</p>
-            <label class="field">
-              <span>{{ t('results.categoricalSelect') }}</span>
-              <select v-model="selectedCategoricalField">
-                <option v-for="[column] in categoricalSummaryEntries" :key="column" :value="column">
-                  {{ column }}
-                </option>
-              </select>
-            </label>
-            <div class="metric-grid">
-              <article
-                v-for="[column, values] in categoricalSummaryEntries.filter(([key]) => key === selectedCategoricalField)"
-                :key="column"
-                class="metric-card"
-              >
-                <h4>{{ column }}</h4>
-                <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
-                <p>
-                  {{ t('results.top') }}:
-                  {{
-                    values.top_values
-                      .map((item) => `${formatValue(item.value)} (${item.count})`)
-                      .join(', ')
-                  }}
-                </p>
-              </article>
-            </div>
-          </section>
-
-          <section class="metric-group">
-            <h3>{{ t('results.correlation') }}</h3>
-            <p class="helper">{{ t('results.correlationHelp') }}</p>
-            <label class="field">
-              <span>{{ t('results.correlationSelect') }}</span>
-              <select v-model="selectedCorrelationField">
-                <option v-for="[column] in correlationEntries" :key="column" :value="column">
-                  {{ column }}
-                </option>
-              </select>
-            </label>
-            <div class="table-shell compact">
-              <table>
-                <thead>
-                  <tr>
-                    <th>{{ t('results.field') }}</th>
-                    <th v-for="[column] in correlationEntries" :key="column">{{ column }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="[rowKey, rowValues] in correlationEntries.filter(([key]) => key === selectedCorrelationField)"
-                    :key="rowKey"
-                  >
-                    <th>{{ rowKey }}</th>
-                    <td v-for="[column] in correlationEntries" :key="column">
-                      {{ formatNumber(rowValues[column]) }}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-        </div>
-        <p v-else class="empty-state">{{ t('results.analysisEmpty') }}</p>
-      </article>
-
-      <article class="panel summary-panel">
-        <div class="panel-head">
-          <div>
-            <p class="panel-kicker">{{ t('results.analysis') }}</p>
-            <h2>{{ t('results.targetGroups') }}</h2>
-          </div>
-          <strong class="badge">{{ selectedGroupRowCount }}</strong>
-        </div>
-
-        <div v-if="groupOptions.length" class="summary-stack">
-          <section class="metric-group">
-            <div class="group-checkboxes">
-              <label v-for="option in groupOptions" :key="option.key" class="checkbox-chip">
-                <input v-model="selectedGroupKeys" type="checkbox" :value="option.key" />
-                <span>{{ option.label }}</span>
-              </label>
-            </div>
-
-            <div v-if="selectedGroupKeys.length" class="summary-stack">
-              <article class="metric-card">
-                <h4>{{ selectedGroupLabels || t('results.targetGroups') }}</h4>
-                <p>{{ t('results.rowsLabel') }} {{ selectedGroupRowCount }}</p>
-                <p v-if="groupSelectionLoading" class="helper">{{ t('analysis.analyzing') }}</p>
-              </article>
-
-              <template v-if="groupSelectionSummary">
-                <section class="metric-group">
-                  <h3>{{ t('results.numericFields') }}</h3>
-                  <p class="helper">{{ t('results.numericHelp') }}</p>
-                  <label class="field">
-                    <span>{{ t('results.numericSelect') }}</span>
-                    <select v-model="selectedGroupNumericField">
-                      <option v-for="[column] in groupNumericEntries" :key="column" :value="column">
-                        {{ column }}
-                      </option>
-                    </select>
-                  </label>
-                  <div class="metric-grid">
-                    <article
-                      v-for="[column, values] in groupNumericEntries.filter(
-                        ([key]) => key === selectedGroupNumericField,
-                      )"
-                      :key="column"
-                      class="metric-card"
-                    >
-                      <h4>{{ column }}</h4>
-                      <p>{{ t('results.mean') }} {{ formatNumber(values.mean) }}</p>
-                      <p class="helper">{{ t('results.meanHelp') }}</p>
-                      <p>{{ t('results.median') }} {{ formatNumber(values.median) }}</p>
-                      <p class="helper">{{ t('results.medianHelp') }}</p>
-                      <p>{{ t('results.std') }} {{ formatNumber(values.std) }}</p>
-                      <p class="helper">{{ t('results.stdHelp') }}</p>
-                      <p>
-                        {{
-                          t('results.range', {
-                            min: formatNumber(values.min),
-                            max: formatNumber(values.max),
-                          })
-                        }}
-                      </p>
-                      <p class="helper">{{ t('results.rangeHelp') }}</p>
-                    </article>
-                  </div>
-                </section>
-
-                <section class="metric-group">
-                  <h3>{{ t('results.categoricalFields') }}</h3>
-                  <p class="helper">{{ t('results.categoricalHelp') }}</p>
-                  <label class="field">
-                    <span>{{ t('results.categoricalSelect') }}</span>
-                    <select v-model="selectedGroupCategoricalField">
-                      <option v-for="[column] in groupCategoricalEntries" :key="column" :value="column">
-                        {{ column }}
-                      </option>
-                    </select>
-                  </label>
-                  <div class="metric-grid">
-                    <article
-                      v-for="[column, values] in groupCategoricalEntries.filter(
-                        ([key]) => key === selectedGroupCategoricalField,
-                      )"
-                      :key="column"
-                      class="metric-card"
-                    >
-                      <h4>{{ column }}</h4>
-                      <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
-                      <p>
-                        {{ t('results.top') }}:
-                        {{
-                          values.top_values
-                            .map((item) => `${formatValue(item.value)} (${item.count})`)
-                            .join(', ')
-                        }}
-                      </p>
-                    </article>
-                  </div>
-                </section>
-
-                <section class="metric-group">
-                  <h3>{{ t('results.correlation') }}</h3>
-                  <p class="helper">{{ t('results.correlationHelp') }}</p>
-                  <label class="field">
-                    <span>{{ t('results.correlationSelect') }}</span>
-                    <select v-model="selectedGroupCorrelationField">
-                      <option v-for="[column] in groupCorrelationEntries" :key="column" :value="column">
-                        {{ column }}
-                      </option>
-                    </select>
-                  </label>
-                  <div class="table-shell compact">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>{{ t('results.field') }}</th>
-                          <th v-for="[column] in groupCorrelationEntries" :key="column">{{ column }}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr
-                          v-for="[rowKey, rowValues] in groupCorrelationEntries.filter(
-                            ([key]) => key === selectedGroupCorrelationField,
-                          )"
-                          :key="rowKey"
-                        >
-                          <th>{{ rowKey }}</th>
-                          <td v-for="[column] in groupCorrelationEntries" :key="column">
-                            {{ formatNumber(rowValues[column]) }}
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
-              </template>
-            </div>
-          </section>
-        </div>
-        <p v-else class="empty-state">{{ t('results.analysisEmpty') }}</p>
-      </article>
+    <section class="report-toolbar">
+      <div>
+        <p class="panel-kicker">{{ t('report.kicker') }}</p>
+        <h2>{{ t('report.title') }}</h2>
+      </div>
+      <button
+        class="primary-button"
+        :disabled="pdfExporting || !hasReportContent"
+        type="button"
+        @click="exportReportToPdf"
+      >
+        {{ pdfExporting ? t('report.exporting') : t('report.exportPdf') }}
+      </button>
     </section>
 
-    <section class="charts-grid">
-      <article class="panel chart-panel">
-        <div class="panel-head">
-          <div>
-            <p class="panel-kicker">{{ t('charts.kicker') }}</p>
-            <h2>{{ t('charts.title') }}</h2>
+    <div ref="reportRef" class="report-export-area">
+      <section class="results-grid">
+        <article class="panel preview-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">{{ t('results.dataset') }}</p>
+              <h2>{{ t('results.preview') }}</h2>
+            </div>
+            <strong class="badge">{{ t('results.rows', { count: datasetRows.length }) }}</strong>
           </div>
-          <strong class="badge">{{ t('charts.rows', { count: datasetRows.length }) }}</strong>
-        </div>
 
-        <div v-if="datasetRows.length" class="chart-grid">
-          <article class="chart-card">
-            <div class="chart-head">
-              <h3>{{ t('charts.scatterTitle') }}</h3>
-              <p class="helper">{{ t('charts.scatterHelp') }}</p>
+          <div v-if="previewRows.length" class="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th v-for="column in previewColumns" :key="column">{{ column }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, index) in previewRows" :key="index">
+                  <td v-for="column in previewColumns" :key="column">
+                    {{ formatValue(row[column]) }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="empty-state">{{ t('results.emptyDataset') }}</p>
+        </article>
+
+        <article class="panel summary-panel group-summary-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">{{ t('results.analysis') }}</p>
+              <h2>{{ t('results.summary') }}</h2>
             </div>
+            <strong class="badge">{{
+              t('results.analyzed', { count: analysisResult?.summary?.row_count || 0 })
+            }}</strong>
+          </div>
 
-            <div class="chart-controls">
+          <div v-if="analysisResult" class="summary-stack">
+            <section class="metric-group">
+              <h3>{{ t('results.numericFields') }}</h3>
+              <p class="helper">{{ t('results.numericHelp') }}</p>
               <label class="field">
-                <span>{{ t('charts.scatterX') }}</span>
-                <select v-model="chartConfig.scatterX">
-                  <option v-for="column in availableColumns" :key="column" :value="column">
+                <span>{{ t('results.numericSelect') }}</span>
+                <select v-model="selectedNumericField">
+                  <option v-for="[column] in numericSummaryEntries" :key="column" :value="column">
                     {{ column }}
                   </option>
                 </select>
               </label>
+              <div class="metric-grid">
+                <article
+                  v-for="[column, values] in numericSummaryEntries.filter(
+                    ([key]) => key === selectedNumericField,
+                  )"
+                  :key="column"
+                  class="metric-card"
+                >
+                  <h4>{{ column }}</h4>
+                  <p>{{ t('results.mean') }} {{ formatNumber(values.mean) }}</p>
+                  <p class="helper">{{ t('results.meanHelp') }}</p>
+                  <p>{{ t('results.median') }} {{ formatNumber(values.median) }}</p>
+                  <p class="helper">{{ t('results.medianHelp') }}</p>
+                  <p>{{ t('results.std') }} {{ formatNumber(values.std) }}</p>
+                  <p class="helper">{{ t('results.stdHelp') }}</p>
+                  <p>
+                    {{
+                      t('results.range', {
+                        min: formatNumber(values.min),
+                        max: formatNumber(values.max),
+                      })
+                    }}
+                  </p>
+                  <p class="helper">{{ t('results.rangeHelp') }}</p>
+                </article>
+              </div>
+            </section>
+
+            <section class="metric-group">
+              <h3>{{ t('results.categoricalFields') }}</h3>
+              <p class="helper">{{ t('results.categoricalHelp') }}</p>
               <label class="field">
-                <span>{{ t('charts.scatterY') }}</span>
-                <select v-model="chartConfig.scatterY">
-                  <option v-for="column in availableColumns" :key="column" :value="column">
+                <span>{{ t('results.categoricalSelect') }}</span>
+                <select v-model="selectedCategoricalField">
+                  <option
+                    v-for="[column] in categoricalSummaryEntries"
+                    :key="column"
+                    :value="column"
+                  >
                     {{ column }}
                   </option>
                 </select>
               </label>
-            </div>
+              <div class="metric-grid">
+                <article
+                  v-for="[column, values] in categoricalSummaryEntries.filter(
+                    ([key]) => key === selectedCategoricalField,
+                  )"
+                  :key="column"
+                  class="metric-card"
+                >
+                  <h4>{{ column }}</h4>
+                  <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
+                  <p>
+                    {{ t('results.top') }}:
+                    {{
+                      values.top_values
+                        .map((item) => `${formatValue(item.value)} (${item.count})`)
+                        .join(', ')
+                    }}
+                  </p>
+                </article>
+              </div>
+            </section>
 
-            <div class="chart-visual">
-              <div v-if="scatterSeries.points.length" :ref="chartRefs.scatter" class="chart-canvas" />
-              <p v-else class="empty-state">{{ t('charts.noNumeric') }}</p>
-            </div>
-
-            <div v-if="scatterSeries.points.length && scatterSeries.xType === 'value' && scatterSeries.yType === 'value'" class="chart-meta">
-              <span>
-                {{ t('charts.rangeX', { min: formatNumber(scatterSeries.xMin), max: formatNumber(scatterSeries.xMax) }) }}
-              </span>
-              <span>
-                {{ t('charts.rangeY', { min: formatNumber(scatterSeries.yMin), max: formatNumber(scatterSeries.yMax) }) }}
-              </span>
-            </div>
-          </article>
-
-          <article class="chart-card">
-            <div class="chart-head">
-              <h3>{{ t('charts.pieTitle') }}</h3>
-              <p class="helper">{{ t('charts.pieHelp') }}</p>
-            </div>
-
-            <div class="chart-controls">
+            <section class="metric-group">
+              <h3>{{ t('results.correlation') }}</h3>
+              <p class="helper">{{ t('results.correlationHelp') }}</p>
               <label class="field">
-                <span>{{ t('charts.pieCategory') }}</span>
-                <select v-model="chartConfig.pieCategory">
-                  <option v-for="column in availableColumns" :key="column" :value="column">
+                <span>{{ t('results.correlationSelect') }}</span>
+                <select v-model="selectedCorrelationField">
+                  <option v-for="[column] in correlationEntries" :key="column" :value="column">
                     {{ column }}
                   </option>
                 </select>
               </label>
-              <label class="field">
+              <div class="table-shell compact">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{{ t('results.field') }}</th>
+                      <th v-for="[column] in correlationEntries" :key="column">{{ column }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="[rowKey, rowValues] in correlationEntries.filter(
+                        ([key]) => key === selectedCorrelationField,
+                      )"
+                      :key="rowKey"
+                    >
+                      <th>{{ rowKey }}</th>
+                      <td v-for="[column] in correlationEntries" :key="column">
+                        {{ formatNumber(rowValues[column]) }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+          <p v-else class="empty-state">{{ t('results.analysisEmpty') }}</p>
+        </article>
+
+        <article class="panel summary-panel target-groups-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">{{ t('results.analysis') }}</p>
+              <h2>{{ t('results.targetGroups') }}</h2>
+            </div>
+            <strong class="badge">{{ groupPanelBadgeCount }}</strong>
+          </div>
+
+          <div v-if="dateGroupBuckets.length" class="summary-stack">
+            <section class="metric-group">
+              <div class="chart-controls histogram-controls">
+                <label class="field">
+                  <span>{{ t('results.histogramValue') }}</span>
+                  <select v-model="selectedDateHistogramValue">
+                    <option
+                      v-for="option in dateHistogramValueOptions"
+                      :key="option.key"
+                      :value="option.key"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="histogram-tabs">
+                <button
+                  v-for="bucket in dateGroupBuckets"
+                  :key="bucket.key"
+                  class="chip"
+                  :class="{ active: selectedDateHistogramBucket === bucket.key }"
+                  type="button"
+                  @click="selectedDateHistogramBucket = bucket.key"
+                >
+                  {{ bucket.label }}
+                </button>
+              </div>
+
+              <article v-if="selectedDateHistogram" class="date-histogram-card">
+                <div class="chart-head">
+                  <h3>{{ selectedDateHistogram.label }}</h3>
+                  <p class="helper">{{ formatDateHistogramTotal(selectedDateHistogram) }}</p>
+                </div>
+
+                <div
+                  class="chart-visual histogram-visual"
+                  :class="{ 'has-print-image': chartPrintImages.groupHistogram }"
+                >
+                  <img
+                    v-if="chartPrintImages.groupHistogram"
+                    class="print-chart-image"
+                    :src="chartPrintImages.groupHistogram"
+                    :alt="selectedDateHistogram.label"
+                  />
+                  <div :ref="chartRefs.groupHistogram" class="chart-canvas histogram-canvas" />
+                </div>
+              </article>
+            </section>
+          </div>
+
+          <p v-else-if="hasDateGroupResult" class="empty-state">
+            {{ t('results.noDateHistograms') }}
+          </p>
+
+          <div v-else-if="groupOptions.length" class="summary-stack">
+            <section class="metric-group">
+              <div class="group-checkboxes">
+                <label v-for="option in groupOptions" :key="option.key" class="checkbox-chip">
+                  <input v-model="selectedGroupKeys" type="checkbox" :value="option.key" />
+                  <span>{{ option.label }}</span>
+                </label>
+              </div>
+
+              <div v-if="selectedGroupKeys.length" class="summary-stack">
+                <article class="metric-card">
+                  <h4>{{ selectedGroupLabels || t('results.targetGroups') }}</h4>
+                  <p>{{ t('results.rowsLabel') }} {{ selectedGroupRowCount }}</p>
+                  <p v-if="groupSelectionLoading" class="helper">{{ t('analysis.analyzing') }}</p>
+                </article>
+
+                <template v-if="groupSelectionSummary">
+                  <section class="metric-group">
+                    <h3>{{ t('results.numericFields') }}</h3>
+                    <p class="helper">{{ t('results.numericHelp') }}</p>
+                    <label class="field">
+                      <span>{{ t('results.numericSelect') }}</span>
+                      <select v-model="selectedGroupNumericField">
+                        <option
+                          v-for="[column] in groupNumericEntries"
+                          :key="column"
+                          :value="column"
+                        >
+                          {{ column }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="metric-grid">
+                      <article
+                        v-for="[column, values] in groupNumericEntries.filter(
+                          ([key]) => key === selectedGroupNumericField,
+                        )"
+                        :key="column"
+                        class="metric-card"
+                      >
+                        <h4>{{ column }}</h4>
+                        <p>{{ t('results.mean') }} {{ formatNumber(values.mean) }}</p>
+                        <p class="helper">{{ t('results.meanHelp') }}</p>
+                        <p>{{ t('results.median') }} {{ formatNumber(values.median) }}</p>
+                        <p class="helper">{{ t('results.medianHelp') }}</p>
+                        <p>{{ t('results.std') }} {{ formatNumber(values.std) }}</p>
+                        <p class="helper">{{ t('results.stdHelp') }}</p>
+                        <p>
+                          {{
+                            t('results.range', {
+                              min: formatNumber(values.min),
+                              max: formatNumber(values.max),
+                            })
+                          }}
+                        </p>
+                        <p class="helper">{{ t('results.rangeHelp') }}</p>
+                      </article>
+                    </div>
+                  </section>
+
+                  <section class="metric-group">
+                    <h3>{{ t('results.categoricalFields') }}</h3>
+                    <p class="helper">{{ t('results.categoricalHelp') }}</p>
+                    <label class="field">
+                      <span>{{ t('results.categoricalSelect') }}</span>
+                      <select v-model="selectedGroupCategoricalField">
+                        <option
+                          v-for="[column] in groupCategoricalEntries"
+                          :key="column"
+                          :value="column"
+                        >
+                          {{ column }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="metric-grid">
+                      <article
+                        v-for="[column, values] in groupCategoricalEntries.filter(
+                          ([key]) => key === selectedGroupCategoricalField,
+                        )"
+                        :key="column"
+                        class="metric-card"
+                      >
+                        <h4>{{ column }}</h4>
+                        <p>{{ t('results.unique') }} {{ values.unique_values.length }}</p>
+                        <p>
+                          {{ t('results.top') }}:
+                          {{
+                            values.top_values
+                              .map((item) => `${formatValue(item.value)} (${item.count})`)
+                              .join(', ')
+                          }}
+                        </p>
+                      </article>
+                    </div>
+                  </section>
+
+                  <section class="metric-group">
+                    <h3>{{ t('results.correlation') }}</h3>
+                    <p class="helper">{{ t('results.correlationHelp') }}</p>
+                    <label class="field">
+                      <span>{{ t('results.correlationSelect') }}</span>
+                      <select v-model="selectedGroupCorrelationField">
+                        <option
+                          v-for="[column] in groupCorrelationEntries"
+                          :key="column"
+                          :value="column"
+                        >
+                          {{ column }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="table-shell compact">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>{{ t('results.field') }}</th>
+                            <th v-for="[column] in groupCorrelationEntries" :key="column">
+                              {{ column }}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr
+                            v-for="[rowKey, rowValues] in groupCorrelationEntries.filter(
+                              ([key]) => key === selectedGroupCorrelationField,
+                            )"
+                            :key="rowKey"
+                          >
+                            <th>{{ rowKey }}</th>
+                            <td v-for="[column] in groupCorrelationEntries" :key="column">
+                              {{ formatNumber(rowValues[column]) }}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                </template>
+              </div>
+            </section>
+          </div>
+          <p v-else class="empty-state">{{ t('results.analysisEmpty') }}</p>
+        </article>
+      </section>
+
+      <section class="charts-grid">
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">{{ t('charts.kicker') }}</p>
+              <h2>{{ t('charts.title') }}</h2>
+            </div>
+            <strong class="badge">{{ t('charts.rows', { count: datasetRows.length }) }}</strong>
+          </div>
+
+          <div v-if="datasetRows.length" class="chart-grid">
+            <article class="chart-card">
+              <div class="chart-head">
+                <h3>{{ t('charts.scatterTitle') }}</h3>
+                <p class="helper">{{ t('charts.scatterHelp') }}</p>
+              </div>
+
+              <div class="chart-controls">
+                <label class="field">
+                  <span>{{ t('charts.scatterX') }}</span>
+                  <select v-model="chartConfig.scatterX">
+                    <option v-for="column in availableColumns" :key="column" :value="column">
+                      {{ column }}
+                    </option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>{{ t('charts.scatterY') }}</span>
+                  <select v-model="chartConfig.scatterY">
+                    <option v-for="column in availableColumns" :key="column" :value="column">
+                      {{ column }}
+                    </option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="chart-visual" :class="{ 'has-print-image': chartPrintImages.scatter }">
+                <img
+                  v-if="chartPrintImages.scatter"
+                  class="print-chart-image"
+                  :src="chartPrintImages.scatter"
+                  :alt="t('charts.scatterTitle')"
+                />
+                <div
+                  v-if="scatterSeries.points.length"
+                  :ref="chartRefs.scatter"
+                  class="chart-canvas"
+                />
+                <p v-else class="empty-state">{{ t('charts.noNumeric') }}</p>
+              </div>
+
+              <div
+                v-if="
+                  scatterSeries.points.length &&
+                  (scatterSeries.xType === 'value' || scatterSeries.yType === 'value')
+                "
+                class="chart-meta"
+              >
+                <span v-if="scatterSeries.xType === 'value'">
+                  {{
+                    t('charts.rangeX', {
+                      min: formatNumber(scatterSeries.xMin),
+                      max: formatNumber(scatterSeries.xMax),
+                    })
+                  }}
+                </span>
+                <span v-if="scatterSeries.yType === 'value'">
+                  {{
+                    t('charts.rangeY', {
+                      min: formatNumber(scatterSeries.yMin),
+                      max: formatNumber(scatterSeries.yMax),
+                    })
+                  }}
+                </span>
+                <span v-if="scatterSeries.trend">
+                  {{
+                    t('charts.trendEquation', {
+                      equation: formatTrendEquation(scatterSeries.trend),
+                    })
+                  }}
+                </span>
+              </div>
+            </article>
+
+            <article class="chart-card pie-chart-card">
+              <div class="chart-head">
+                <h3>{{ t('charts.pieTitle') }}</h3>
+                <p class="helper">{{ t('charts.pieHelp') }}</p>
+              </div>
+
+              <div class="chart-controls">
+                <label class="field">
+                  <span>{{ t('charts.pieCategory') }}</span>
+                  <select v-model="chartConfig.pieCategory">
+                    <option v-for="column in availableColumns" :key="column" :value="column">
+                      {{ column }}
+                    </option>
+                  </select>
+                </label>
+                <!-- <label class="field">
                 <span>{{ t('charts.pieMode') }}</span>
                 <select v-model="chartConfig.pieMode">
                   <option value="count">{{ t('charts.pieCount') }}</option>
                   <option value="sum">{{ t('charts.pieSum') }}</option>
                 </select>
-              </label>
-              <label class="field">
+              </label> -->
+                <!-- <label class="field">
                 <span>{{ t('charts.pieValue') }}</span>
                 <select v-model="chartConfig.pieValue" :disabled="chartConfig.pieMode !== 'sum'">
                   <option v-for="column in numericColumns" :key="column" :value="column">
                     {{ column }}
                   </option>
                 </select>
-              </label>
-            </div>
+              </label> -->
+              </div>
 
-            <div class="chart-visual">
-              <div v-if="pieData.slices.length" :ref="chartRefs.pie" class="chart-canvas" />
-              <p v-else class="empty-state">{{ t('charts.noCategory') }}</p>
-            </div>
+              <div class="chart-visual" :class="{ 'has-print-image': chartPrintImages.pie }">
+                <img
+                  v-if="chartPrintImages.pie"
+                  class="print-chart-image"
+                  :src="chartPrintImages.pie"
+                  :alt="t('charts.pieTitle')"
+                />
+                <div v-if="pieData.slices.length" :ref="chartRefs.pie" class="chart-canvas" />
+                <p v-else class="empty-state">{{ t('charts.noCategory') }}</p>
+              </div>
+              <div v-if="chartPrintImages.pie && pieData.slices.length" class="print-chart-legend">
+                <div
+                  v-for="slice in pieData.slices"
+                  :key="slice.label"
+                  class="print-chart-legend-item"
+                >
+                  <span
+                    class="print-chart-legend-swatch"
+                    :style="{ backgroundColor: slice.color }"
+                  />
+                  <span class="print-chart-legend-label">{{ slice.label }}</span>
+                  <strong>{{ formatNumber(slice.value) }}</strong>
+                </div>
+              </div>
+            </article>
+          </div>
 
-          </article>
-        </div>
-
-        <p v-else class="empty-state">{{ t('charts.empty') }}</p>
-      </article>
-    </section>
+          <p v-else class="empty-state">{{ t('charts.empty') }}</p>
+        </article>
+      </section>
+    </div>
   </div>
 </template>
